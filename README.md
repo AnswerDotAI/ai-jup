@@ -59,9 +59,9 @@ Open [test_syntax.ipynb](test_syntax.ipynb) for a starter notebook demonstrating
 
 Or create your own:
 
-1. Press `Cmd/Ctrl + Shift + P` to insert a prompt cell
+1. Press `Cmd + Shift + P` (Mac) or `Ctrl + Shift + P` (Windows/Linux) to insert a prompt cell
 2. Type: `What is 2 + 2?`
-3. Press `Cmd/Ctrl + Shift + Enter` to execute
+3. Press `Cmd + Shift + Enter` (Mac) or `Ctrl + Shift + Enter` (Windows/Linux) to execute
 
 You should see the AI respond with streaming text.
 
@@ -78,7 +78,7 @@ Then in a prompt cell:
 What is the sum of $`data`?
 ```
 
-Press `Cmd/Ctrl + Shift + Enter` to execute.
+Press `Cmd + Shift + Enter` (Mac) or `Ctrl + Shift + Enter` (Windows/Linux) to execute.
 
 ## Syntax
 
@@ -196,10 +196,10 @@ Tool results are automatically formatted:
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Cmd/Ctrl + Shift + P` | Insert new prompt cell below |
-| `Cmd/Ctrl + Shift + Enter` | Execute prompt cell |
+| Shortcut (Mac) | Shortcut (Windows/Linux) | Action |
+|----------------|--------------------------|--------|
+| `Cmd + Shift + P` | `Ctrl + Shift + P` | Insert new prompt cell below |
+| `Cmd + Shift + Enter` | `Ctrl + Shift + Enter` | Execute prompt cell |
 
 ## Configuration
 
