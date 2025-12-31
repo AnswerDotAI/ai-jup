@@ -45,7 +45,20 @@ fields = ["description", "authors", "urls"]
 
 [tool.hatch.build.targets.sdist]
 artifacts = ["ai_jup/labextension"]
-exclude = [".github", "binder"]
+exclude = [
+    ".github",
+    "binder",
+    "node_modules",
+    "lib",
+    ".yarn",
+    "ui-tests",
+    "playwright-report",
+    ".pytest_cache",
+    ".ipynb_checkpoints",
+    "*.ipynb",
+    "dist",
+    "*.egg-info",
+]
 
 [tool.hatch.build.targets.wheel.shared-data]
 "ai_jup/labextension" = "share/jupyter/labextensions/ai-jup"

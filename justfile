@@ -190,9 +190,39 @@ dist-check: dist
 publish-test: dist-check
     twine upload --repository testpypi dist/*
 
-# Upload to PyPI (production)
-publish: dist-check
+# Bump minor version, build, and upload to PyPI
+publish:
+    #!/usr/bin/env bash
+    set -e
+    
+    # Get current version and bump patch
+    current=$(jq -r '.version' package.json)
+    IFS='.' read -r major minor patch <<< "$current"
+    new_version="$major.$minor.$((patch + 1))"
+    
+    echo "Bumping version: $current -> $new_version"
+    
+    # Update package.json
+    jq --arg v "$new_version" '.version = $v' package.json > package.json.tmp
+    mv package.json.tmp package.json
+    
+    # Clean, build, and check
+    just clean
+    just build-prod
+    python -m build
+    twine check dist/*
+    
+    # Commit version bump
+    git add package.json
+    git commit -m "Release v$new_version"
+    git tag "v$new_version"
+    
+    # Upload to PyPI
     twine upload dist/*
+    
+    echo ""
+    echo "✅ Published v$new_version to PyPI"
+    echo "   Don't forget to push: git push && git push --tags"
 
 # Full release workflow: test, build, check, publish to PyPI
 release: test dist-check
