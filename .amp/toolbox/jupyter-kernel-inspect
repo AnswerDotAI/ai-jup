@@ -1,0 +1,241 @@
+#!/usr/bin/env python
+"""
+Inspect Jupyter kernel state - variables, functions, and namespace.
+Simulates what the KernelConnector.ts does to help debug introspection issues.
+"""
+import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+def describe():
+    print("""name: jupyter-kernel-inspect
+description: Inspect the Jupyter kernel namespace to see variables and functions that ai-jup can access. Useful for debugging variable/function introspection issues.
+notebook: string (optional) - path to a notebook file to inspect. If not provided, lists running kernels.
+kernel_id: string (optional) - specific kernel ID to connect to
+action: string (one of: list-kernels, variables, functions, test-introspection) - what to inspect. Default is 'list-kernels'.""")
+
+def list_running_kernels():
+    """List all running Jupyter kernels."""
+    try:
+        result = subprocess.run(
+            ["jupyter", "kernel", "list", "--json"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            kernels = json.loads(result.stdout)
+            return kernels
+        else:
+            # Fallback to non-json output
+            result = subprocess.run(
+                ["jupyter", "kernel", "list"],
+                capture_output=True, text=True, timeout=10
+            )
+            return {"raw_output": result.stdout + result.stderr}
+    except json.JSONDecodeError:
+        return {"raw_output": result.stdout}
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_introspection_code(action: str) -> str:
+    """Get the Python code used by KernelConnector for introspection."""
+    
+    if action == "variables":
+        return '''
+import json as _json_mod
+try:
+    _skip = {'In', 'Out', 'get_ipython', 'exit', 'quit', '_', '__', '___'}
+    _skip.update(k for k in dir(__builtins__) if not k.startswith('_'))
+    _vars = []
+    for _name, _val in list(globals().items()):
+        if _name.startswith('_') or _name in _skip:
+            continue
+        if callable(_val) and not isinstance(_val, type):
+            continue
+        try:
+            _vars.append({
+                "name": _name,
+                "type": type(_val).__name__,
+                "repr": repr(_val)[:200]
+            })
+        except Exception:
+            pass
+    print(_json_mod.dumps(_vars, indent=2))
+    del _skip, _vars
+except Exception as _e:
+    print(_json_mod.dumps({"error": str(_e)}))
+'''
+    
+    elif action == "functions":
+        return '''
+import json as _json_mod
+import inspect as _inspect_mod
+try:
+    _skip = {'get_ipython', 'exit', 'quit'}
+    _skip.update(k for k in dir(__builtins__) if not k.startswith('_'))
+    _funcs = []
+    for _name, _val in list(globals().items()):
+        if _name.startswith('_') or _name in _skip:
+            continue
+        if callable(_val) and not isinstance(_val, type):
+            try:
+                _sig = str(_inspect_mod.signature(_val))
+                _doc = _inspect_mod.getdoc(_val) or "No documentation"
+                _funcs.append({
+                    "name": _name,
+                    "signature": _sig,
+                    "docstring": _doc[:200]
+                })
+            except Exception:
+                _funcs.append({"name": _name, "signature": "(?)", "docstring": "Could not inspect"})
+    print(_json_mod.dumps(_funcs, indent=2))
+    del _skip, _funcs
+except Exception as _e:
+    print(_json_mod.dumps({"error": str(_e)}))
+'''
+    
+    elif action == "test-introspection":
+        return '''
+import json as _json_mod
+import inspect as _inspect_mod
+
+print("=" * 50)
+print("KERNEL INTROSPECTION TEST")
+print("=" * 50)
+
+# Test 1: Basic namespace access
+print("\\n1. Checking globals() access...")
+try:
+    _globals = list(globals().keys())
+    print(f"   ✅ Can access globals: {len(_globals)} items")
+except Exception as e:
+    print(f"   ❌ Error: {e}")
+
+# Test 2: Variable introspection
+print("\\n2. Testing variable introspection...")
+test_var = [1, 2, 3]
+try:
+    _info = {
+        "name": "test_var",
+        "type": type(test_var).__name__,
+        "repr": repr(test_var)
+    }
+    print(f"   ✅ Can introspect variables: {_info}")
+except Exception as e:
+    print(f"   ❌ Error: {e}")
+
+# Test 3: Function introspection
+print("\\n3. Testing function introspection...")
+def test_func(x: int, y: str = "default") -> str:
+    """A test function with typed parameters."""
+    return f"{x}: {y}"
+
+try:
+    _sig = str(_inspect_mod.signature(test_func))
+    _doc = _inspect_mod.getdoc(test_func)
+    _params = {}
+    for _pname, _param in _inspect_mod.signature(test_func).parameters.items():
+        _pinfo = {"type": "string", "description": _pname}
+        if _param.annotation != _inspect_mod.Parameter.empty:
+            _ann = _param.annotation
+            if hasattr(_ann, '__name__'):
+                _pinfo["type"] = _ann.__name__
+        if _param.default != _inspect_mod.Parameter.empty:
+            _pinfo["default"] = repr(_param.default)
+        _params[_pname] = _pinfo
+    print(f"   ✅ Signature: {_sig}")
+    print(f"   ✅ Docstring: {_doc}")
+    print(f"   ✅ Parameters: {_json_mod.dumps(_params)}")
+except Exception as e:
+    print(f"   ❌ Error: {e}")
+
+# Test 4: JSON serialization
+print("\\n4. Testing JSON serialization...")
+try:
+    import numpy as np
+    _arr = np.array([1, 2, 3])
+    _repr = repr(_arr)[:200]
+    print(f"   ✅ NumPy array repr: {_repr}")
+except ImportError:
+    print("   ⚠️  NumPy not installed (optional)")
+except Exception as e:
+    print(f"   ❌ Error: {e}")
+
+try:
+    import pandas as pd
+    _df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    _repr = repr(_df)[:200]
+    print(f"   ✅ Pandas DataFrame repr: {_repr}")
+except ImportError:
+    print("   ⚠️  Pandas not installed (optional)")
+except Exception as e:
+    print(f"   ❌ Error: {e}")
+
+print("\\n" + "=" * 50)
+print("INTROSPECTION TEST COMPLETE")
+print("=" * 50)
+
+# Cleanup
+del test_var, test_func
+'''
+    
+    return "print('Unknown action')"
+
+def show_introspection_code(action: str):
+    """Show the code that would be executed for introspection."""
+    code = get_introspection_code(action)
+    print(f"Python code for '{action}' introspection:")
+    print("-" * 50)
+    print(code)
+    print("-" * 50)
+    print("\nTo test this, run the above code in a Jupyter notebook cell.")
+
+def execute():
+    """Execute the tool based on input."""
+    input_data = sys.stdin.read().strip()
+    action = "list-kernels"
+    notebook = None
+    kernel_id = None
+    
+    if input_data:
+        for line in input_data.split("\n"):
+            if line.startswith("action:"):
+                action = line.split(":", 1)[1].strip()
+            elif line.startswith("notebook:"):
+                notebook = line.split(":", 1)[1].strip()
+            elif line.startswith("kernel_id:"):
+                kernel_id = line.split(":", 1)[1].strip()
+    
+    if action == "list-kernels":
+        print("Running Jupyter Kernels:")
+        print("-" * 50)
+        kernels = list_running_kernels()
+        if "error" in kernels:
+            print(f"Error: {kernels['error']}")
+        elif "raw_output" in kernels:
+            print(kernels["raw_output"])
+        else:
+            print(json.dumps(kernels, indent=2))
+        print("\nNote: To inspect a kernel, you need to run the introspection")
+        print("code directly in a notebook cell. Use action=test-introspection")
+        print("to see the code that ai-jup uses for introspection.")
+    
+    elif action in ["variables", "functions", "test-introspection"]:
+        show_introspection_code(action)
+    
+    else:
+        print(f"Unknown action: {action}")
+        print("Valid actions: list-kernels, variables, functions, test-introspection")
+
+if __name__ == "__main__":
+    action = os.environ.get("TOOLBOX_ACTION")
+    if action == "describe":
+        describe()
+    elif action == "execute":
+        execute()
+    else:
+        # Direct execution for testing
+        print("Running kernels:")
+        kernels = list_running_kernels()
+        print(json.dumps(kernels, indent=2) if isinstance(kernels, dict) else kernels)

@@ -1,0 +1,245 @@
+#!/usr/bin/env python
+"""
+Galata E2E testing tool for ai-jup JupyterLab extension.
+Runs visual regression tests and E2E tests using JupyterLab's official testing framework.
+"""
+import os
+import sys
+import subprocess
+import json
+from pathlib import Path
+
+def describe():
+    print("""name: jupyter-galata
+description: Run Galata E2E visual regression tests for ai-jup. Uses JupyterLab's official testing framework with Playwright. Supports snapshot testing and full browser automation.
+action: string (one of: test, update-snapshots, install, check, show-report) - what action to perform. Default is 'test'.
+headed: boolean (optional) - run browser in headed mode (visible). Default is false (headless).
+filter: string (optional) - filter tests by name pattern (e.g., 'persistence' to run only persistence tests).
+debug: boolean (optional) - run in debug mode with Playwright inspector. Default is false.""")
+
+
+def get_project_root():
+    """Get the project root directory."""
+    return os.environ.get("WORKSPACE_ROOT", os.getcwd())
+
+
+def run_command(cmd: list, cwd: str = None, timeout: int = 300, capture: bool = True):
+    """Run a command and return result."""
+    try:
+        if capture:
+            result = subprocess.run(
+                cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            )
+            return {
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr
+            }
+        else:
+            result = subprocess.run(cmd, cwd=cwd, timeout=timeout)
+            return {"returncode": result.returncode}
+    except subprocess.TimeoutExpired:
+        return {"returncode": -1, "error": "timeout"}
+    except Exception as e:
+        return {"returncode": -1, "error": str(e)}
+
+
+def check_galata_setup():
+    """Check if Galata is properly set up."""
+    print("🔍 Checking Galata Setup")
+    print("-" * 50)
+    
+    project_root = get_project_root()
+    results = {}
+    
+    # Check package.json has galata
+    pkg_path = Path(project_root) / "package.json"
+    if pkg_path.exists():
+        with open(pkg_path) as f:
+            pkg = json.load(f)
+        has_galata = "@jupyterlab/galata" in pkg.get("devDependencies", {})
+        print(f"   {'✅' if has_galata else '❌'} @jupyterlab/galata in devDependencies")
+        results["galata_pkg"] = has_galata
+    else:
+        print("   ❌ package.json not found")
+        results["galata_pkg"] = False
+    
+    # Check playwright config exists
+    config_path = Path(project_root) / "playwright.config.ts"
+    has_config = config_path.exists()
+    print(f"   {'✅' if has_config else '❌'} playwright.config.ts exists")
+    results["config"] = has_config
+    
+    # Check ui-tests directory exists
+    ui_tests_path = Path(project_root) / "ui-tests"
+    has_ui_tests = ui_tests_path.exists() and any(ui_tests_path.glob("*.spec.ts"))
+    print(f"   {'✅' if has_ui_tests else '❌'} ui-tests/ directory with specs")
+    results["ui_tests"] = has_ui_tests
+    
+    # Check jupyter_server_test_config.py exists
+    server_config = Path(project_root) / "jupyter_server_test_config.py"
+    has_server_config = server_config.exists()
+    print(f"   {'✅' if has_server_config else '❌'} jupyter_server_test_config.py exists")
+    results["server_config"] = has_server_config
+    
+    # Check node_modules has galata installed
+    galata_path = Path(project_root) / "node_modules" / "@jupyterlab" / "galata"
+    has_galata_installed = galata_path.exists()
+    print(f"   {'✅' if has_galata_installed else '❌'} @jupyterlab/galata installed")
+    results["galata_installed"] = has_galata_installed
+    
+    # Check playwright browsers
+    result = run_command(["npx", "playwright", "--version"], cwd=project_root, timeout=30)
+    has_playwright = result["returncode"] == 0
+    print(f"   {'✅' if has_playwright else '❌'} Playwright CLI available")
+    results["playwright"] = has_playwright
+    
+    all_good = all(results.values())
+    print()
+    if all_good:
+        print("✅ Galata setup complete! Ready to run tests.")
+    else:
+        print("⚠️  Some setup steps needed. Run with action=install to fix.")
+    
+    return all_good
+
+
+def install_galata():
+    """Install Galata dependencies and set up for testing."""
+    print("📦 Installing Galata Dependencies")
+    print("-" * 50)
+    
+    project_root = get_project_root()
+    
+    # Install npm dependencies
+    print("\n1. Installing npm packages...")
+    result = run_command(["yarn", "install"], cwd=project_root, timeout=300, capture=False)
+    if result["returncode"] != 0:
+        print("❌ Failed to install npm packages")
+        return False
+    print("✅ npm packages installed")
+    
+    # Install Playwright browsers
+    print("\n2. Installing Playwright browsers...")
+    result = run_command(["npx", "playwright", "install", "chromium"], cwd=project_root, timeout=300, capture=False)
+    if result["returncode"] != 0:
+        print("❌ Failed to install Playwright browsers")
+        return False
+    print("✅ Playwright browsers installed")
+    
+    # Build the extension
+    print("\n3. Building extension...")
+    result = run_command(["yarn", "build"], cwd=project_root, timeout=300, capture=False)
+    if result["returncode"] != 0:
+        print("⚠️  Build failed - may need manual intervention")
+    else:
+        print("✅ Extension built")
+    
+    print("\n✅ Galata installation complete!")
+    return True
+
+
+def run_tests(headed: bool = False, filter_pattern: str = None, debug: bool = False, update_snapshots: bool = False):
+    """Run Galata E2E tests."""
+    print("🧪 Running Galata E2E Tests")
+    print("-" * 50)
+    
+    project_root = get_project_root()
+    
+    # Check if server is running or should be managed by playwright
+    cmd = ["npx", "playwright", "test"]
+    
+    if headed:
+        cmd.append("--headed")
+    
+    if debug:
+        cmd.append("--debug")
+    
+    if filter_pattern:
+        cmd.extend(["-g", filter_pattern])
+    
+    if update_snapshots:
+        cmd.append("--update-snapshots")
+    
+    # Set environment to skip webserver if one is already running
+    env = os.environ.copy()
+    
+    # Check if a server is already running on port 8888
+    import urllib.request
+    import urllib.error
+    try:
+        urllib.request.urlopen("http://localhost:8888/lab", timeout=2)
+        print("   Using existing Jupyter server on port 8888")
+        env["SKIP_SERVER"] = "1"
+        env["TARGET_URL"] = "http://localhost:8888"
+    except (urllib.error.URLError, Exception):
+        print("   Will start Jupyter server for tests")
+    
+    print(f"\n   Command: {' '.join(cmd)}\n")
+    
+    # Run tests
+    result = subprocess.run(cmd, cwd=project_root, env=env)
+    
+    if result.returncode == 0:
+        print("\n✅ All tests passed!")
+    else:
+        print(f"\n❌ Tests failed with exit code {result.returncode}")
+    
+    return result.returncode == 0
+
+
+def show_report():
+    """Open the Playwright HTML report."""
+    print("📊 Opening Playwright Report")
+    print("-" * 50)
+    
+    project_root = get_project_root()
+    
+    result = run_command(["npx", "playwright", "show-report"], cwd=project_root, timeout=10, capture=False)
+    
+    return result["returncode"] == 0
+
+
+def execute():
+    """Execute the tool based on input."""
+    input_data = sys.stdin.read().strip()
+    action = "test"
+    headed = False
+    filter_pattern = None
+    debug = False
+    
+    if input_data:
+        for line in input_data.split("\n"):
+            if line.startswith("action:"):
+                action = line.split(":", 1)[1].strip()
+            elif line.startswith("headed:"):
+                headed = line.split(":", 1)[1].strip().lower() in ["true", "yes", "1"]
+            elif line.startswith("filter:"):
+                filter_pattern = line.split(":", 1)[1].strip()
+            elif line.startswith("debug:"):
+                debug = line.split(":", 1)[1].strip().lower() in ["true", "yes", "1"]
+    
+    if action == "check":
+        check_galata_setup()
+    elif action == "install":
+        install_galata()
+    elif action == "test":
+        run_tests(headed=headed, filter_pattern=filter_pattern, debug=debug)
+    elif action == "update-snapshots":
+        run_tests(headed=headed, filter_pattern=filter_pattern, update_snapshots=True)
+    elif action == "show-report":
+        show_report()
+    else:
+        print(f"Unknown action: {action}")
+        print("Valid actions: test, update-snapshots, install, check, show-report")
+
+
+if __name__ == "__main__":
+    action = os.environ.get("TOOLBOX_ACTION")
+    if action == "describe":
+        describe()
+    elif action == "execute":
+        execute()
+    else:
+        # Direct execution for testing
+        check_galata_setup()

@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+"""
+Build and manage the ai-jup JupyterLab extension.
+"""
+import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+def describe():
+    print("""name: jupyter-build
+description: Build the ai-jup JupyterLab extension. Compiles TypeScript and builds the labextension. Use after making code changes.
+action: string (one of: build, build-prod, clean, install-dev, check-types) - what build action to perform. Default is 'build'.
+watch: boolean (optional) - whether to run in watch mode for continuous rebuilding. Only works with 'build' action.""")
+
+def get_project_root():
+    """Get the project root directory."""
+    return os.environ.get("WORKSPACE_ROOT", os.getcwd())
+
+def run_command(cmd: list, cwd: str = None, stream: bool = True):
+    """Run a command and optionally stream output."""
+    print(f"\n🔧 Running: {' '.join(cmd)}")
+    print("-" * 50)
+    
+    try:
+        if stream:
+            process = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            output_lines = []
+            for line in process.stdout:
+                print(line.rstrip())
+                output_lines.append(line)
+            
+            process.wait()
+            return {
+                "returncode": process.returncode,
+                "output": "".join(output_lines)
+            }
+        else:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            return {
+                "returncode": result.returncode,
+                "output": result.stdout + result.stderr
+            }
+    except subprocess.TimeoutExpired:
+        return {"returncode": -1, "output": "Command timed out"}
+    except Exception as e:
+        return {"returncode": -1, "output": str(e)}
+
+def build(project_root: str, production: bool = False):
+    """Build the extension."""
+    print("=" * 60)
+    print(f"BUILDING AI-JUP {'(PRODUCTION)' if production else '(DEVELOPMENT)'}")
+    print("=" * 60)
+    
+    os.chdir(project_root)
+    
+    # Check if node_modules exists
+    node_modules = Path(project_root) / "node_modules"
+    if not node_modules.exists():
+        print("\n📦 node_modules not found, running jlpm install...")
+        result = run_command(["jlpm", "install"], cwd=project_root)
+        if result["returncode"] != 0:
+            print("❌ jlpm install failed")
+            return False
+    
+    # Build command
+    cmd = ["jlpm", "build:prod" if production else "build"]
+    result = run_command(cmd, cwd=project_root)
+    
+    if result["returncode"] == 0:
+        print("\n" + "=" * 60)
+        print("✅ Build completed successfully!")
+        
+        # Show what was built
+        lib_dir = Path(project_root) / "lib"
+        labext_dir = Path(project_root) / "ai_jup" / "labextension"
+        
+        if lib_dir.exists():
+            ts_files = list(lib_dir.glob("*.js"))
+            print(f"   📁 TypeScript output: {len(ts_files)} files in lib/")
+        
+        if labext_dir.exists():
+            print(f"   📁 Lab extension: {labext_dir}")
+        
+        print("=" * 60)
+        return True
+    else:
+        print("\n❌ Build failed. See errors above.")
+        return False
+
+def clean(project_root: str):
+    """Clean build artifacts."""
+    print("=" * 60)
+    print("CLEANING BUILD ARTIFACTS")
+    print("=" * 60)
+    
+    result = run_command(["jlpm", "clean:all"], cwd=project_root)
+    
+    if result["returncode"] == 0:
+        print("\n✅ Clean completed successfully!")
+    else:
+        print("\n⚠️  Clean may have had issues. Check output above.")
+    
+    return result["returncode"] == 0
+
+def install_dev(project_root: str):
+    """Install the extension in development mode."""
+    print("=" * 60)
+    print("INSTALLING IN DEVELOPMENT MODE")
+    print("=" * 60)
+    
+    # First build
+    if not build(project_root):
+        return False
+    
+    # Then install the labextension for development
+    print("\n📦 Installing lab extension for development...")
+    result = run_command(
+        ["jupyter", "labextension", "develop", ".", "--overwrite"],
+        cwd=project_root
+    )
+    
+    if result["returncode"] == 0:
+        print("\n✅ Development install completed!")
+        print("   Restart JupyterLab to see changes.")
+    else:
+        print("\n❌ Development install failed.")
+    
+    return result["returncode"] == 0
+
+def check_types(project_root: str):
+    """Run TypeScript type checking without building."""
+    print("=" * 60)
+    print("TYPE CHECKING (tsc --noEmit)")
+    print("=" * 60)
+    
+    result = run_command(["npx", "tsc", "--noEmit"], cwd=project_root)
+    
+    if result["returncode"] == 0:
+        print("\n✅ No type errors found!")
+    else:
+        print("\n❌ Type errors found. See output above.")
+    
+    return result["returncode"] == 0
+
+def watch_instructions():
+    """Show instructions for watch mode."""
+    print("""
+📺 WATCH MODE INSTRUCTIONS
+==========================
+
+Watch mode continuously rebuilds when you change source files.
+It must be run in an interactive terminal.
+
+To start watch mode, run:
+
+    cd /Users/hamel/git/ai-jup
+    jlpm watch
+
+This runs two processes:
+    - tsc -w: Watches TypeScript files
+    - jupyter labextension watch .: Watches for labextension changes
+
+For the best experience:
+    1. Start JupyterLab in one terminal: jupyter lab
+    2. Start watch mode in another: jlpm watch
+    3. Make changes to src/*.ts files
+    4. Refresh JupyterLab to see changes
+
+💡 Tip: After making changes, you may need to:
+    - Refresh the browser (F5)
+    - Or restart JupyterLab for certain changes
+""")
+
+def execute():
+    """Execute the tool based on input."""
+    input_data = sys.stdin.read().strip()
+    action = "build"
+    watch = False
+    
+    if input_data:
+        for line in input_data.split("\n"):
+            if line.startswith("action:"):
+                action = line.split(":", 1)[1].strip()
+            elif line.startswith("watch:"):
+                watch = line.split(":", 1)[1].strip().lower() in ["true", "yes", "1"]
+    
+    project_root = get_project_root()
+    
+    if action == "build":
+        if watch:
+            watch_instructions()
+        else:
+            build(project_root)
+    elif action == "build-prod":
+        build(project_root, production=True)
+    elif action == "clean":
+        clean(project_root)
+    elif action == "install-dev":
+        install_dev(project_root)
+    elif action == "check-types":
+        check_types(project_root)
+    else:
+        print(f"Unknown action: {action}")
+        print("Valid actions: build, build-prod, clean, install-dev, check-types")
+
+if __name__ == "__main__":
+    action = os.environ.get("TOOLBOX_ACTION")
+    if action == "describe":
+        describe()
+    elif action == "execute":
+        execute()
+    else:
+        # Direct execution for testing
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        build(project_root)

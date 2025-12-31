@@ -1,0 +1,689 @@
+#!/usr/bin/env python
+"""
+Comprehensive debugging tool for the ai-jup JupyterLab extension.
+Combines Jupyter server management, Playwright browser automation,
+notebook execution, and LLM-powered prompt cell testing.
+"""
+import os
+import sys
+import json
+import time
+import subprocess
+import tempfile
+import signal
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+import urllib.request
+import urllib.error
+
+def describe():
+    print("""name: jupyter-debug
+description: Comprehensive debugging tool for ai-jup. Combines Jupyter server management, Playwright browser automation, notebook execution, and LLM testing. Use this to rapidly test and debug the extension end-to-end.
+action: string (one of: full-test, start-server, test-prompt-cell, run-notebook, check-all, test-llm, browser-test, stop-server) - what to do. Default is 'check-all'.
+notebook: string (optional) - path to notebook file for run-notebook action
+prompt: string (optional) - test prompt for test-prompt-cell action
+port: number (optional) - Jupyter server port. Default is 8888.
+headless: boolean (optional) - run browser in headless mode. Default is true.""")
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+def get_project_root():
+    """Get the project root directory."""
+    return os.environ.get("WORKSPACE_ROOT", os.getcwd())
+
+def get_anthropic_key():
+    """Get Anthropic API key from environment."""
+    return os.environ.get("ANTHROPIC_API_KEY", "")
+
+def run_command(cmd: list, cwd: str = None, timeout: int = 60, capture: bool = True):
+    """Run a command and return result."""
+    try:
+        if capture:
+            result = subprocess.run(
+                cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            )
+            return {
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr
+            }
+        else:
+            result = subprocess.run(cmd, cwd=cwd, timeout=timeout)
+            return {"returncode": result.returncode}
+    except subprocess.TimeoutExpired:
+        return {"returncode": -1, "error": "timeout"}
+    except Exception as e:
+        return {"returncode": -1, "error": str(e)}
+
+def find_jupyter_servers():
+    """Find running Jupyter servers."""
+    result = run_command(["jupyter", "server", "list", "--json"], timeout=10)
+    servers = []
+    if result["returncode"] == 0:
+        for line in result["stdout"].strip().split("\n"):
+            if line:
+                try:
+                    servers.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return servers
+
+def make_request(url: str, method: str = "GET", data: dict = None, token: str = None, timeout: int = 30):
+    """Make HTTP request to Jupyter server."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+    
+    request_data = json.dumps(data).encode("utf-8") if data else None
+    req = urllib.request.Request(url, data=request_data, headers=headers, method=method)
+    
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return {"status": response.status, "body": response.read().decode("utf-8")}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code, "error": str(e), "body": e.read().decode("utf-8") if e.fp else ""}
+    except Exception as e:
+        return {"status": 0, "error": str(e)}
+
+
+# ============================================================================
+# LLM Testing
+# ============================================================================
+
+def test_llm_connection():
+    """Test that we can connect to Anthropic API."""
+    print("\n🤖 Testing LLM Connection (Anthropic Claude)")
+    print("-" * 50)
+    
+    api_key = get_anthropic_key()
+    if not api_key:
+        print("❌ ANTHROPIC_API_KEY not set in environment")
+        return False
+    
+    print(f"✅ API key found (length: {len(api_key)})")
+    
+    try:
+        import anthropic
+        print("✅ anthropic package installed")
+    except ImportError:
+        print("❌ anthropic package not installed. Run: pip install anthropic")
+        return False
+    
+    # Test actual API call
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=50,
+            messages=[{"role": "user", "content": "Say 'AI-JUP test successful' in exactly those words."}]
+        )
+        text = response.content[0].text
+        print(f"✅ API call successful: {text[:100]}")
+        return True
+    except Exception as e:
+        print(f"❌ API call failed: {e}")
+        return False
+
+
+def test_prompt_endpoint(base_url: str, token: str, prompt: str = None):
+    """Test the ai-jup prompt endpoint with a real LLM call."""
+    print("\n📡 Testing AI-JUP Prompt Endpoint")
+    print("-" * 50)
+    
+    if not prompt:
+        prompt = "Say 'Hello from ai-jup' and nothing else."
+    
+    url = f"{base_url}/ai-jup/prompt"
+    data = {
+        "prompt": prompt,
+        "context": {
+            "variables": {},
+            "functions": {},
+            "preceding_code": "# Test cell\nx = 42"
+        },
+        "model": "claude-sonnet-4-20250514"
+    }
+    
+    print(f"   URL: {url}")
+    print(f"   Prompt: {prompt[:50]}...")
+    
+    result = make_request(url, "POST", data=data, token=token, timeout=60)
+    
+    if result.get("status") == 200:
+        print(f"✅ Status: {result['status']}")
+        # Parse SSE response
+        response_text = ""
+        for line in result["body"].split("\n"):
+            if line.startswith("data: "):
+                try:
+                    event = json.loads(line[6:])
+                    if event.get("text"):
+                        response_text += event["text"]
+                    elif event.get("error"):
+                        print(f"❌ Error in response: {event['error']}")
+                        return False
+                except json.JSONDecodeError:
+                    pass
+        print(f"✅ Response: {response_text[:200]}")
+        return True
+    else:
+        print(f"❌ Status: {result.get('status')}")
+        print(f"❌ Error: {result.get('error', result.get('body', 'Unknown'))}")
+        return False
+
+
+# ============================================================================
+# Notebook Execution
+# ============================================================================
+
+def create_test_notebook(output_path: str = None) -> str:
+    """Create a test notebook with prompt cells."""
+    if not output_path:
+        output_path = os.path.join(get_project_root(), "test_debug_notebook.ipynb")
+    
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "# Test variables and functions\n",
+                    "import pandas as pd\n",
+                    "import numpy as np\n",
+                    "\n",
+                    "# Sample data\n",
+                    "df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})\n",
+                    "x = 42\n",
+                    "name = 'test'\n",
+                    "\n",
+                    "def calculate_sum(a: int, b: int) -> int:\n",
+                    "    '''Calculate the sum of two numbers.'''\n",
+                    "    return a + b\n",
+                    "\n",
+                    "def describe_data(data):\n",
+                    "    '''Describe a pandas DataFrame.'''\n",
+                    "    return data.describe()\n",
+                    "\n",
+                    "print('Setup complete!')"
+                ]
+            },
+            {
+                "cell_type": "markdown",
+                "metadata": {
+                    "ai_jup": {
+                        "isPromptCell": True,
+                        "model": "claude-sonnet-4-20250514"
+                    }
+                },
+                "source": [
+                    "**AI Prompt:** What is the value of $x? Use &calculate_sum to add 10 to it."
+                ]
+            },
+            {
+                "cell_type": "markdown",
+                "metadata": {
+                    "ai_jup": {
+                        "isPromptCell": True,
+                        "model": "claude-sonnet-4-20250514"
+                    }
+                },
+                "source": [
+                    "**AI Prompt:** Describe $df and explain what it contains."
+                ]
+            }
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            },
+            "language_info": {
+                "name": "python",
+                "version": "3.11.0"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5
+    }
+    
+    with open(output_path, "w") as f:
+        json.dump(notebook, f, indent=2)
+    
+    print(f"✅ Created test notebook: {output_path}")
+    return output_path
+
+
+def run_notebook_headless(notebook_path: str):
+    """Run a notebook using nbconvert/papermill."""
+    print(f"\n📓 Running notebook: {notebook_path}")
+    print("-" * 50)
+    
+    # Try papermill first, then nbconvert
+    try:
+        import papermill
+        output_path = notebook_path.replace(".ipynb", "_executed.ipynb")
+        print("   Using papermill...")
+        papermill.execute_notebook(notebook_path, output_path)
+        print(f"✅ Executed successfully. Output: {output_path}")
+        return True
+    except ImportError:
+        print("   papermill not installed, trying nbconvert...")
+    except Exception as e:
+        print(f"❌ papermill execution failed: {e}")
+    
+    # Fallback to nbconvert
+    result = run_command([
+        "jupyter", "nbconvert", "--to", "notebook", "--execute",
+        "--output", notebook_path.replace(".ipynb", "_executed.ipynb"),
+        notebook_path
+    ], timeout=120)
+    
+    if result["returncode"] == 0:
+        print("✅ Executed successfully with nbconvert")
+        return True
+    else:
+        print(f"❌ Execution failed: {result.get('stderr', result.get('error', 'Unknown'))}")
+        return False
+
+
+# ============================================================================
+# Browser Automation (Playwright)
+# ============================================================================
+
+def generate_playwright_test_script(notebook_url: str, headless: bool = True) -> str:
+    """Generate a Playwright script to test the extension in browser."""
+    script = f'''
+const {{ chromium }} = require('playwright');
+
+(async () => {{
+    console.log('🎭 Starting Playwright browser test...');
+    
+    const browser = await chromium.launch({{ headless: {str(headless).lower()} }});
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    
+    // Capture console messages
+    page.on('console', msg => {{
+        const type = msg.type();
+        const text = msg.text();
+        if (text.includes('ai-jup') || text.includes('AI-Jup') || type === 'error') {{
+            console.log(`[${{type.toUpperCase()}}] ${{text}}`);
+        }}
+    }});
+    
+    // Navigate to JupyterLab
+    console.log('📍 Navigating to: {notebook_url}');
+    await page.goto('{notebook_url}');
+    
+    // Wait for JupyterLab to load
+    console.log('⏳ Waiting for JupyterLab to load...');
+    await page.waitForSelector('.jp-Notebook', {{ timeout: 30000 }});
+    console.log('✅ JupyterLab loaded');
+    
+    // Check if extension is loaded
+    const extensionLoaded = await page.evaluate(() => {{
+        return window.jupyterlab?.commands?.hasCommand('ai-jup:insert-prompt-cell') ?? false;
+    }});
+    console.log(`📦 Extension loaded: ${{extensionLoaded}}`);
+    
+    // Take screenshot
+    await page.screenshot({{ path: 'debug_screenshot.png', fullPage: true }});
+    console.log('📸 Screenshot saved: debug_screenshot.png');
+    
+    // Try to insert a prompt cell
+    console.log('🔧 Testing prompt cell insertion...');
+    try {{
+        await page.keyboard.press('Control+Shift+p');
+        await page.waitForTimeout(1000);
+        await page.screenshot({{ path: 'debug_after_insert.png' }});
+        console.log('✅ Prompt cell command executed');
+    }} catch (e) {{
+        console.log('❌ Failed to insert prompt cell:', e.message);
+    }}
+    
+    await browser.close();
+    console.log('🎭 Browser test complete');
+}})();
+'''
+    return script
+
+
+def run_browser_test(base_url: str, token: str, notebook_path: str = None, headless: bool = True):
+    """Run Playwright browser test."""
+    print("\n🎭 Running Playwright Browser Test")
+    print("-" * 50)
+    
+    # Check if playwright is installed
+    result = run_command(["npx", "playwright", "--version"], timeout=30)
+    if result["returncode"] != 0:
+        print("❌ Playwright not installed. Run: npx playwright install")
+        return False
+    
+    # Build notebook URL
+    if notebook_path:
+        notebook_url = f"{base_url}/lab/tree/{os.path.basename(notebook_path)}?token={token}"
+    else:
+        notebook_url = f"{base_url}/lab?token={token}"
+    
+    print(f"   URL: {notebook_url}")
+    
+    # Generate and run test script
+    script = generate_playwright_test_script(notebook_url, headless)
+    script_path = os.path.join(get_project_root(), "_playwright_test.js")
+    
+    with open(script_path, "w") as f:
+        f.write(script)
+    
+    print("   Running Playwright script...")
+    result = run_command(["node", script_path], cwd=get_project_root(), timeout=120)
+    
+    if result["returncode"] == 0:
+        print("✅ Browser test passed")
+        print(result.get("stdout", ""))
+    else:
+        print(f"❌ Browser test failed")
+        print(result.get("stderr", result.get("stdout", "")))
+    
+    # Cleanup
+    try:
+        os.remove(script_path)
+    except:
+        pass
+    
+    return result["returncode"] == 0
+
+
+# ============================================================================
+# Server Management
+# ============================================================================
+
+def start_jupyter_server(port: int = 8888):
+    """Start a Jupyter server if not running."""
+    print(f"\n🚀 Starting Jupyter Server on port {port}")
+    print("-" * 50)
+    
+    # Check if already running
+    servers = find_jupyter_servers()
+    for server in servers:
+        if str(port) in server.get("url", ""):
+            print(f"✅ Server already running: {server['url']}")
+            return server
+    
+    # Start new server
+    project_root = get_project_root()
+    cmd = [
+        "jupyter", "lab",
+        f"--port={port}",
+        "--no-browser",
+        f"--notebook-dir={project_root}",
+        "--ServerApp.token=debug-token",
+        "--ServerApp.allow_origin=*"
+    ]
+    
+    print(f"   Command: {' '.join(cmd)}")
+    print("   Starting server in background...")
+    
+    # Start in background
+    process = subprocess.Popen(
+        cmd,
+        cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True
+    )
+    
+    # Wait for server to be ready
+    for i in range(30):
+        time.sleep(1)
+        servers = find_jupyter_servers()
+        for server in servers:
+            if str(port) in server.get("url", ""):
+                print(f"✅ Server started: {server['url']}")
+                return server
+        print(f"   Waiting... ({i+1}/30)")
+    
+    print("❌ Failed to start server within 30 seconds")
+    return None
+
+
+def stop_jupyter_server(port: int = 8888):
+    """Stop Jupyter server on specified port."""
+    print(f"\n🛑 Stopping Jupyter Server on port {port}")
+    print("-" * 50)
+    
+    result = run_command(["jupyter", "server", "stop", str(port)], timeout=10)
+    if result["returncode"] == 0:
+        print("✅ Server stopped")
+        return True
+    else:
+        print(f"⚠️  Could not stop server: {result.get('stderr', 'Unknown error')}")
+        return False
+
+
+# ============================================================================
+# Main Actions
+# ============================================================================
+
+def check_all():
+    """Run all diagnostic checks."""
+    print("=" * 60)
+    print("AI-JUP COMPREHENSIVE DIAGNOSTIC CHECK")
+    print("=" * 60)
+    
+    results = {}
+    project_root = get_project_root()
+    
+    # 1. Check build status
+    print("\n📦 Build Status:")
+    lib_exists = os.path.exists(os.path.join(project_root, "lib", "index.js"))
+    labext_exists = os.path.exists(os.path.join(project_root, "ai_jup", "labextension", "package.json"))
+    print(f"   {'✅' if lib_exists else '❌'} TypeScript compiled")
+    print(f"   {'✅' if labext_exists else '❌'} Lab extension built")
+    results["build"] = lib_exists and labext_exists
+    
+    # 2. Check extension installation
+    print("\n📦 Extension Installation:")
+    result = run_command(["jupyter", "labextension", "list"], timeout=30)
+    installed = "ai-jup" in result.get("stdout", "") + result.get("stderr", "")
+    print(f"   {'✅' if installed else '❌'} Extension installed")
+    results["extension"] = installed
+    
+    # 3. Check server extension
+    print("\n🖥️  Server Extension:")
+    result = run_command(["jupyter", "server", "extension", "list"], timeout=30)
+    server_ext = "ai_jup" in result.get("stdout", "") + result.get("stderr", "")
+    print(f"   {'✅' if server_ext else '❌'} Server extension installed")
+    results["server_ext"] = server_ext
+    
+    # 4. Check LLM
+    print("\n🤖 LLM Configuration:")
+    api_key = get_anthropic_key()
+    print(f"   {'✅' if api_key else '❌'} ANTHROPIC_API_KEY set")
+    results["api_key"] = bool(api_key)
+    
+    # 5. Check running servers
+    print("\n🌐 Running Jupyter Servers:")
+    servers = find_jupyter_servers()
+    if servers:
+        for s in servers:
+            print(f"   - {s.get('url', 'unknown')}")
+        results["server_running"] = True
+    else:
+        print("   No servers running")
+        results["server_running"] = False
+    
+    # 6. Check Playwright
+    print("\n🎭 Playwright:")
+    result = run_command(["npx", "playwright", "--version"], timeout=30)
+    pw_installed = result["returncode"] == 0
+    print(f"   {'✅' if pw_installed else '❌'} Playwright installed")
+    results["playwright"] = pw_installed
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    all_passed = all(results.values())
+    for check, passed in results.items():
+        print(f"   {'✅' if passed else '❌'} {check}")
+    
+    if all_passed:
+        print("\n✅ All checks passed! Ready for testing.")
+    else:
+        print("\n⚠️  Some checks failed. Fix issues above before testing.")
+    
+    return all_passed
+
+
+def full_test(port: int = 8888, headless: bool = True):
+    """Run full end-to-end test."""
+    print("=" * 60)
+    print("AI-JUP FULL END-TO-END TEST")
+    print("=" * 60)
+    
+    results = {}
+    
+    # 1. Check all prerequisites
+    print("\n[1/6] Checking prerequisites...")
+    results["prereqs"] = check_all()
+    
+    # 2. Test LLM connection
+    print("\n[2/6] Testing LLM connection...")
+    results["llm"] = test_llm_connection()
+    
+    # 3. Find or start server
+    print("\n[3/6] Finding/starting Jupyter server...")
+    servers = find_jupyter_servers()
+    server = None
+    for s in servers:
+        if str(port) in s.get("url", ""):
+            server = s
+            break
+    
+    if not server:
+        server = start_jupyter_server(port)
+    
+    if server:
+        base_url = server["url"].rstrip("/")
+        token = server.get("token", "debug-token")
+        results["server"] = True
+    else:
+        print("❌ No server available")
+        results["server"] = False
+        return results
+    
+    # 4. Test API endpoints
+    print("\n[4/6] Testing API endpoints...")
+    models_url = f"{base_url}/ai-jup/models"
+    models_result = make_request(models_url, token=token)
+    results["api_models"] = models_result.get("status") == 200
+    print(f"   {'✅' if results['api_models'] else '❌'} /ai-jup/models endpoint")
+    
+    # 5. Test prompt endpoint with LLM
+    print("\n[5/6] Testing prompt endpoint with LLM...")
+    results["api_prompt"] = test_prompt_endpoint(base_url, token)
+    
+    # 6. Browser test (optional)
+    print("\n[6/6] Running browser test...")
+    test_notebook = create_test_notebook()
+    results["browser"] = run_browser_test(base_url, token, test_notebook, headless)
+    
+    # Final summary
+    print("\n" + "=" * 60)
+    print("FINAL TEST RESULTS")
+    print("=" * 60)
+    for test, passed in results.items():
+        print(f"   {'✅' if passed else '❌'} {test}")
+    
+    all_passed = all(results.values())
+    if all_passed:
+        print("\n🎉 All tests passed! Extension is working correctly.")
+    else:
+        print("\n⚠️  Some tests failed. Check output above for details.")
+    
+    return results
+
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+def execute():
+    """Execute the tool based on input."""
+    input_data = sys.stdin.read().strip()
+    action = "check-all"
+    notebook = None
+    prompt = None
+    port = 8888
+    headless = True
+    
+    if input_data:
+        for line in input_data.split("\n"):
+            if line.startswith("action:"):
+                action = line.split(":", 1)[1].strip()
+            elif line.startswith("notebook:"):
+                notebook = line.split(":", 1)[1].strip()
+            elif line.startswith("prompt:"):
+                prompt = line.split(":", 1)[1].strip()
+            elif line.startswith("port:"):
+                try:
+                    port = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("headless:"):
+                headless = line.split(":", 1)[1].strip().lower() in ["true", "yes", "1"]
+    
+    if action == "check-all":
+        check_all()
+    elif action == "full-test":
+        full_test(port, headless)
+    elif action == "start-server":
+        start_jupyter_server(port)
+    elif action == "stop-server":
+        stop_jupyter_server(port)
+    elif action == "test-llm":
+        test_llm_connection()
+    elif action == "test-prompt-cell":
+        servers = find_jupyter_servers()
+        if servers:
+            server = servers[0]
+            base_url = server["url"].rstrip("/")
+            token = server.get("token", "")
+            test_prompt_endpoint(base_url, token, prompt)
+        else:
+            print("❌ No Jupyter server running. Start one first with action=start-server")
+    elif action == "run-notebook":
+        if notebook:
+            run_notebook_headless(notebook)
+        else:
+            test_nb = create_test_notebook()
+            run_notebook_headless(test_nb)
+    elif action == "browser-test":
+        servers = find_jupyter_servers()
+        if servers:
+            server = servers[0]
+            base_url = server["url"].rstrip("/")
+            token = server.get("token", "")
+            run_browser_test(base_url, token, notebook, headless)
+        else:
+            print("❌ No Jupyter server running. Start one first with action=start-server")
+    else:
+        print(f"Unknown action: {action}")
+        print("Valid actions: full-test, start-server, stop-server, test-prompt-cell, run-notebook, check-all, test-llm, browser-test")
+
+
+if __name__ == "__main__":
+    action = os.environ.get("TOOLBOX_ACTION")
+    if action == "describe":
+        describe()
+    elif action == "execute":
+        execute()
+    else:
+        # Direct execution for testing
+        check_all()

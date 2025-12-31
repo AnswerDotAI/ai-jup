@@ -1,0 +1,114 @@
+{
+  "name": "ai-jup",
+  "version": "0.1.0",
+  "description": "JupyterLab extension for AI-powered prompt cells with variable and function references",
+  "keywords": [
+    "jupyter",
+    "jupyterlab",
+    "jupyterlab-extension",
+    "ai",
+    "llm"
+  ],
+  "homepage": "https://github.com/hamelsmu/ai-jup",
+  "license": "MIT",
+  "author": {
+    "name": "Hamel Husain"
+  },
+  "files": [
+    "lib/**/*.{d.ts,eot,gif,html,jpg,js,js.map,json,png,svg,woff2,ttf}",
+    "style/**/*.{css,js,eot,gif,html,jpg,json,png,svg,woff2,ttf}"
+  ],
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "style": "style/index.css",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hamelsmu/ai-jup.git"
+  },
+  "scripts": {
+    "build": "jlpm build:lib && jlpm build:labextension:dev",
+    "build:prod": "jlpm clean && jlpm build:lib:prod && jlpm build:labextension",
+    "build:labextension": "jupyter labextension build .",
+    "build:labextension:dev": "jupyter labextension build --development True .",
+    "build:lib": "tsc --sourceMap",
+    "build:lib:prod": "tsc",
+    "clean": "jlpm clean:lib",
+    "clean:lib": "rimraf lib tsconfig.tsbuildinfo",
+    "clean:lintcache": "rimraf .eslintcache .stylelintcache",
+    "clean:labextension": "rimraf ai_jup/labextension ai_jup/_version.py",
+    "clean:all": "jlpm clean:lib && jlpm clean:labextension && jlpm clean:lintcache",
+    "install:extension": "jlpm build",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "watch": "run-p watch:src watch:labextension",
+    "watch:src": "tsc -w --sourceMap",
+    "watch:labextension": "jupyter labextension watch .",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:e2e": "playwright test",
+    "test:e2e:update": "playwright test --update-snapshots"
+  },
+  "dependencies": {
+    "@jupyterlab/application": "^4.0.0",
+    "@jupyterlab/apputils": "^4.0.0",
+    "@jupyterlab/cells": "^4.0.0",
+    "@jupyterlab/codeeditor": "^4.0.0",
+    "@jupyterlab/codemirror": "^4.0.0",
+    "@jupyterlab/coreutils": "^6.0.0",
+    "@jupyterlab/notebook": "^4.0.0",
+    "@jupyterlab/rendermime": "^4.0.0",
+    "@jupyterlab/services": "^7.0.0",
+    "@jupyterlab/ui-components": "^4.0.0",
+    "@lumino/messaging": "^2.0.0",
+    "@lumino/signaling": "^2.0.0",
+    "@lumino/widgets": "^2.0.0",
+    "marked": "^9.0.0"
+  },
+  "devDependencies": {
+    "@jupyterlab/builder": "^4.0.0",
+    "@jupyterlab/galata": "^5.5.1",
+    "@playwright/test": "^1.57.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.0.0",
+    "jest": "^30.2.0",
+    "npm-run-all": "^4.1.5",
+    "rimraf": "^5.0.0",
+    "ts-jest": "^29.4.6",
+    "typescript": "~5.0.0"
+  },
+  "sideEffects": [
+    "style/*.css",
+    "style/index.js"
+  ],
+  "styleModule": "style/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "jupyterlab": {
+    "extension": true,
+    "outputDir": "ai_jup/labextension",
+    "sharedPackages": {
+      "@jupyterlab/application": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/apputils": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/cells": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/notebook": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/services": {
+        "bundled": false,
+        "singleton": true
+      }
+    }
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+}

@@ -1,0 +1,279 @@
+#!/usr/bin/env python
+"""
+View and analyze JupyterLab logs for debugging the ai-jup extension.
+"""
+import os
+import sys
+import json
+import subprocess
+import re
+from pathlib import Path
+from datetime import datetime
+
+def describe():
+    print("""name: jupyter-logs
+description: View and analyze JupyterLab logs to debug the ai-jup extension. Shows server logs, extension errors, and frontend console guidance.
+action: string (one of: server-logs, find-logs, browser-console, extension-errors) - what logs to view. Default is 'server-logs'.
+lines: number (optional) - number of log lines to show. Default is 50.
+filter: string (optional) - filter logs containing this string (case-insensitive).""")
+
+def find_jupyter_runtime_dir():
+    """Find the Jupyter runtime directory."""
+    try:
+        result = subprocess.run(
+            ["jupyter", "--runtime-dir"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    
+    # Fallback paths
+    home = Path.home()
+    candidates = [
+        home / ".local" / "share" / "jupyter" / "runtime",
+        home / "Library" / "Jupyter" / "runtime",
+        Path("/tmp"),
+    ]
+    
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    
+    return None
+
+def find_log_files():
+    """Find Jupyter log files."""
+    runtime_dir = find_jupyter_runtime_dir()
+    log_files = []
+    
+    if runtime_dir:
+        runtime_path = Path(runtime_dir)
+        # Look for jupyter server logs
+        for pattern in ["*.log", "jupyter*.log", "jpserver*.log"]:
+            log_files.extend(runtime_path.glob(pattern))
+    
+    # Also check common log locations
+    home = Path.home()
+    other_locations = [
+        home / ".jupyter" / "jupyter.log",
+        Path("/var/log/jupyter.log"),
+    ]
+    
+    for path in other_locations:
+        if path.exists():
+            log_files.append(path)
+    
+    return sorted(log_files, key=lambda f: f.stat().st_mtime if f.exists() else 0, reverse=True)
+
+def show_server_logs(lines: int = 50, filter_str: str = None):
+    """Show recent Jupyter server logs."""
+    print("=" * 60)
+    print("JUPYTER SERVER LOGS")
+    print("=" * 60)
+    
+    log_files = find_log_files()
+    
+    if not log_files:
+        print("\n⚠️  No Jupyter log files found.")
+        print("\nTo see live logs, run JupyterLab with verbose output:")
+        print("  jupyter lab --debug 2>&1 | tee jupyter.log")
+        print("\nOr use the systemd journal if running as a service:")
+        print("  journalctl -u jupyter -n 100")
+        return
+    
+    print(f"\n📂 Found {len(log_files)} log file(s):")
+    for f in log_files[:5]:
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        size = f.stat().st_size
+        print(f"   - {f} ({size} bytes, modified {mtime})")
+    
+    # Read most recent log file
+    most_recent = log_files[0]
+    print(f"\n📄 Reading {most_recent}:")
+    print("-" * 60)
+    
+    try:
+        with open(most_recent, "r") as f:
+            all_lines = f.readlines()
+        
+        # Apply filter if specified
+        if filter_str:
+            all_lines = [l for l in all_lines if filter_str.lower() in l.lower()]
+            print(f"(Filtered for '{filter_str}')")
+        
+        # Show last N lines
+        for line in all_lines[-lines:]:
+            # Highlight errors and warnings
+            if "error" in line.lower():
+                print(f"❌ {line.rstrip()}")
+            elif "warn" in line.lower():
+                print(f"⚠️  {line.rstrip()}")
+            elif "ai-jup" in line.lower() or "ai_jup" in line.lower():
+                print(f"🔍 {line.rstrip()}")
+            else:
+                print(f"   {line.rstrip()}")
+    
+    except Exception as e:
+        print(f"Error reading log file: {e}")
+
+def show_browser_console_instructions():
+    """Show how to get browser console logs."""
+    print("=" * 60)
+    print("BROWSER CONSOLE LOGS (Frontend Debugging)")
+    print("=" * 60)
+    
+    print("""
+The ai-jup frontend (TypeScript) logs to the browser console.
+To view these logs:
+
+1. Open JupyterLab in your browser
+2. Open Developer Tools:
+   - Chrome/Edge: Ctrl+Shift+J (Cmd+Option+J on Mac)
+   - Firefox: Ctrl+Shift+K (Cmd+Option+K on Mac)
+   - Safari: Cmd+Option+C
+3. Go to the "Console" tab
+
+🔍 Look for messages containing:
+   - "AI-Jup" - Extension initialization
+   - "ai-jup" - API calls and responses
+   - Errors (shown in red)
+
+📝 Key log messages to look for:
+
+   ✅ "AI-Jup extension activated" 
+      → Extension loaded successfully
+   
+   ❌ "Failed to connect to AI backend"
+      → API endpoint issue (check server logs)
+   
+   ❌ "Error getting variable X"
+      → Kernel introspection problem
+   
+   ❌ "No kernel connector found"
+      → Kernel not connected
+
+💡 To add more logging, edit src/index.ts and add:
+   console.log('Debug:', someValue);
+
+🔧 For network debugging:
+   - Go to the "Network" tab
+   - Filter for "ai-jup"
+   - Look at request/response details
+""")
+
+def find_extension_errors():
+    """Search logs specifically for ai-jup related errors."""
+    print("=" * 60)
+    print("AI-JUP EXTENSION ERRORS")
+    print("=" * 60)
+    
+    log_files = find_log_files()
+    errors_found = []
+    
+    # Patterns that indicate ai-jup issues
+    patterns = [
+        r"ai.?jup",
+        r"prompt.*error",
+        r"kernel.*error",
+        r"introspect",
+        r"ANTHROPIC",
+    ]
+    
+    pattern = re.compile("|".join(patterns), re.IGNORECASE)
+    
+    for log_file in log_files[:3]:
+        try:
+            with open(log_file, "r") as f:
+                for i, line in enumerate(f):
+                    if pattern.search(line):
+                        errors_found.append({
+                            "file": str(log_file),
+                            "line_num": i + 1,
+                            "content": line.strip()
+                        })
+        except Exception as e:
+            print(f"Error reading {log_file}: {e}")
+    
+    if errors_found:
+        print(f"\n Found {len(errors_found)} relevant log entries:\n")
+        for entry in errors_found[-20:]:  # Show last 20
+            print(f"[{entry['file']}:{entry['line_num']}]")
+            print(f"  {entry['content']}")
+            print()
+    else:
+        print("\n✅ No ai-jup related errors found in server logs.")
+        print("\nFor frontend errors, check the browser console.")
+        print("(Use action=browser-console for instructions)")
+
+def list_log_locations():
+    """List where Jupyter logs are stored."""
+    print("=" * 60)
+    print("JUPYTER LOG LOCATIONS")
+    print("=" * 60)
+    
+    runtime_dir = find_jupyter_runtime_dir()
+    print(f"\n📂 Runtime directory: {runtime_dir}")
+    
+    log_files = find_log_files()
+    print(f"\n📄 Found {len(log_files)} log file(s):")
+    for f in log_files:
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        size = f.stat().st_size
+        print(f"   - {f}")
+        print(f"     Size: {size} bytes, Modified: {mtime}")
+    
+    print("""
+💡 Tips for better logging:
+
+1. Run JupyterLab with debug mode:
+   jupyter lab --debug
+
+2. Save logs to a file:
+   jupyter lab --debug 2>&1 | tee ~/jupyter-debug.log
+
+3. Watch logs in real-time:
+   tail -f /path/to/jupyter.log | grep -i ai-jup
+""")
+
+def execute():
+    """Execute the tool based on input."""
+    input_data = sys.stdin.read().strip()
+    action = "server-logs"
+    lines = 50
+    filter_str = None
+    
+    if input_data:
+        for line in input_data.split("\n"):
+            if line.startswith("action:"):
+                action = line.split(":", 1)[1].strip()
+            elif line.startswith("lines:"):
+                try:
+                    lines = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("filter:"):
+                filter_str = line.split(":", 1)[1].strip()
+    
+    if action == "server-logs":
+        show_server_logs(lines, filter_str)
+    elif action == "find-logs":
+        list_log_locations()
+    elif action == "browser-console":
+        show_browser_console_instructions()
+    elif action == "extension-errors":
+        find_extension_errors()
+    else:
+        print(f"Unknown action: {action}")
+        print("Valid actions: server-logs, find-logs, browser-console, extension-errors")
+
+if __name__ == "__main__":
+    action = os.environ.get("TOOLBOX_ACTION")
+    if action == "describe":
+        describe()
+    elif action == "execute":
+        execute()
+    else:
+        # Direct execution for testing
+        show_server_logs(30)

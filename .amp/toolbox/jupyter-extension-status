@@ -1,0 +1,183 @@
+#!/usr/bin/env python
+"""
+Check the status of the ai-jup JupyterLab extension.
+Reports on installation, build state, and configuration.
+"""
+import os
+import sys
+import json
+import subprocess
+
+def describe():
+    print("""name: jupyter-extension-status
+description: Check if the ai-jup JupyterLab extension is properly installed, built, and configured. Use this to diagnose extension loading issues.
+action: string (one of: check, list-extensions, check-build, check-server) - what to check. Default is 'check' for full status.""")
+
+def get_extension_status():
+    """Check if extension is installed via jupyter labextension."""
+    try:
+        result = subprocess.run(
+            ["jupyter", "labextension", "list"],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout + result.stderr
+        
+        is_installed = "ai-jup" in output
+        is_enabled = is_installed and "enabled" in output.lower()
+        
+        return {
+            "installed": is_installed,
+            "enabled": is_enabled,
+            "raw_output": output
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def check_build_status():
+    """Check if TypeScript is compiled and labextension is built."""
+    project_root = os.environ.get("WORKSPACE_ROOT", os.getcwd())
+    
+    checks = {}
+    
+    # Check lib directory (TypeScript output)
+    lib_dir = os.path.join(project_root, "lib")
+    lib_index = os.path.join(lib_dir, "index.js")
+    checks["typescript_built"] = os.path.exists(lib_index)
+    
+    # Check labextension directory
+    labext_dir = os.path.join(project_root, "ai_jup", "labextension")
+    labext_package = os.path.join(labext_dir, "package.json")
+    checks["labextension_built"] = os.path.exists(labext_package)
+    
+    # Check for recent modifications
+    src_dir = os.path.join(project_root, "src")
+    if checks["typescript_built"] and os.path.exists(src_dir):
+        src_mtime = max(
+            os.path.getmtime(os.path.join(src_dir, f))
+            for f in os.listdir(src_dir) if f.endswith(".ts")
+        )
+        lib_mtime = os.path.getmtime(lib_index)
+        checks["build_is_stale"] = src_mtime > lib_mtime
+    else:
+        checks["build_is_stale"] = None
+    
+    return checks
+
+def check_server_extension():
+    """Check if the server extension is installed."""
+    try:
+        result = subprocess.run(
+            ["jupyter", "server", "extension", "list"],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout + result.stderr
+        
+        is_installed = "ai_jup" in output or "jupyter_ai_jup" in output
+        
+        return {
+            "server_extension_installed": is_installed,
+            "raw_output": output
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def check_api_key():
+    """Check if ANTHROPIC_API_KEY is set."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return {
+        "api_key_set": bool(key),
+        "api_key_length": len(key) if key else 0
+    }
+
+def full_check():
+    """Run all checks and return comprehensive status."""
+    print("=" * 60)
+    print("AI-JUP EXTENSION STATUS CHECK")
+    print("=" * 60)
+    
+    print("\n📦 Extension Installation:")
+    ext_status = get_extension_status()
+    if "error" in ext_status:
+        print(f"  ❌ Error: {ext_status['error']}")
+    else:
+        print(f"  {'✅' if ext_status['installed'] else '❌'} Installed: {ext_status['installed']}")
+        print(f"  {'✅' if ext_status['enabled'] else '❌'} Enabled: {ext_status['enabled']}")
+    
+    print("\n🔧 Build Status:")
+    build_status = check_build_status()
+    print(f"  {'✅' if build_status['typescript_built'] else '❌'} TypeScript compiled: {build_status['typescript_built']}")
+    print(f"  {'✅' if build_status['labextension_built'] else '❌'} Lab extension built: {build_status['labextension_built']}")
+    if build_status.get("build_is_stale"):
+        print(f"  ⚠️  Build is STALE - source files changed since last build")
+    
+    print("\n🖥️  Server Extension:")
+    server_status = check_server_extension()
+    if "error" in server_status:
+        print(f"  ❌ Error: {server_status['error']}")
+    else:
+        print(f"  {'✅' if server_status['server_extension_installed'] else '❌'} Installed: {server_status['server_extension_installed']}")
+    
+    print("\n🔑 API Configuration:")
+    api_status = check_api_key()
+    print(f"  {'✅' if api_status['api_key_set'] else '❌'} ANTHROPIC_API_KEY set: {api_status['api_key_set']}")
+    
+    print("\n" + "=" * 60)
+    
+    # Summary
+    all_good = (
+        ext_status.get("installed", False) and
+        build_status.get("typescript_built", False) and
+        build_status.get("labextension_built", False) and
+        server_status.get("server_extension_installed", False) and
+        api_status.get("api_key_set", False) and
+        not build_status.get("build_is_stale", False)
+    )
+    
+    if all_good:
+        print("✅ All checks passed! Extension should be working.")
+    else:
+        print("⚠️  Some checks failed. See above for details.")
+        print("\nSuggested fixes:")
+        if not build_status.get("typescript_built") or build_status.get("build_is_stale"):
+            print("  - Run: jlpm build")
+        if not ext_status.get("installed"):
+            print("  - Run: jupyter labextension develop . --overwrite")
+        if not server_status.get("server_extension_installed"):
+            print("  - Run: pip install -e .")
+        if not api_status.get("api_key_set"):
+            print("  - Set ANTHROPIC_API_KEY environment variable")
+
+def execute():
+    """Execute the tool based on TOOLBOX_INPUT."""
+    input_data = sys.stdin.read().strip()
+    action = "check"
+    
+    if input_data:
+        for line in input_data.split("\n"):
+            if line.startswith("action:"):
+                action = line.split(":", 1)[1].strip()
+    
+    if action == "check":
+        full_check()
+    elif action == "list-extensions":
+        status = get_extension_status()
+        print(status.get("raw_output", ""))
+    elif action == "check-build":
+        status = check_build_status()
+        print(json.dumps(status, indent=2))
+    elif action == "check-server":
+        status = check_server_extension()
+        print(status.get("raw_output", ""))
+    else:
+        print(f"Unknown action: {action}")
+        print("Valid actions: check, list-extensions, check-build, check-server")
+
+if __name__ == "__main__":
+    action = os.environ.get("TOOLBOX_ACTION")
+    if action == "describe":
+        describe()
+    elif action == "execute":
+        execute()
+    else:
+        # Direct execution for testing
+        full_check()

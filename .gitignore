@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter-server-*.log
+.jupyter-server-*.pid
+Untitled*.ipynb
+test_notebook.ipynb
+
+# Node
+node_modules/
+lib/
+
+# Build artifacts
+ai_jup/labextension/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Playwright/Galata test artifacts
+test-results/
+playwright-report/
