@@ -13,7 +13,9 @@ import {
 } from '@jupyterlab/application';
 
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { ICommandPalette } from '@jupyterlab/apputils';
+import { ICommandPalette, ToolbarButton } from '@jupyterlab/apputils';
+import { IMainMenu } from '@jupyterlab/mainmenu';
+import { addIcon } from '@jupyterlab/ui-components';
 import { PromptCellManager } from './promptCell';
 import { KernelConnector } from './kernelConnector';
 
@@ -27,11 +29,12 @@ const plugin: JupyterFrontEndPlugin<void> = {
   description: 'AI-powered prompt cells for JupyterLab',
   autoStart: true,
   requires: [INotebookTracker],
-  optional: [ICommandPalette],
+  optional: [ICommandPalette, IMainMenu],
   activate: (
     app: JupyterFrontEnd,
     notebookTracker: INotebookTracker,
-    palette: ICommandPalette | null
+    palette: ICommandPalette | null,
+    mainMenu: IMainMenu | null
   ) => {
     console.log('AI-Jup extension activated');
 
@@ -72,10 +75,24 @@ const plugin: JupyterFrontEndPlugin<void> = {
       selector: '.jp-Notebook'
     });
 
+    // "P" in command mode inserts prompt cell (like "M" for markdown, "Y" for code)
+    app.commands.addKeyBinding({
+      command: insertPromptCommand,
+      keys: ['P'],
+      selector: '.jp-Notebook.jp-mod-commandMode:not(.jp-mod-readWrite) :focus'
+    });
+
+    // Shift+Enter on prompt cells runs AI instead of normal execution
     app.commands.addKeyBinding({
       command: runPromptCommand,
-      keys: ['Accel Shift Enter'],
-      selector: '.jp-Notebook .jp-Cell.ai-jup-prompt-cell'
+      keys: ['Shift Enter'],
+      selector: '.jp-Notebook.jp-mod-editMode .jp-Cell.ai-jup-prompt-cell'
+    });
+
+    app.commands.addKeyBinding({
+      command: runPromptCommand,
+      keys: ['Shift Enter'],
+      selector: '.jp-Notebook.jp-mod-commandMode .jp-Cell.jp-mod-selected.ai-jup-prompt-cell'
     });
 
     // Add to command palette
@@ -90,6 +107,14 @@ const plugin: JupyterFrontEndPlugin<void> = {
       });
     }
 
+    // Add to Edit menu
+    if (mainMenu) {
+      mainMenu.editMenu.addGroup([
+        { command: insertPromptCommand },
+        { command: runPromptCommand }
+      ], 20);
+    }
+
     // Helper to set up a notebook panel
     const setupPanel = (panel: NotebookPanel) => {
       const doSetup = () => {
@@ -97,8 +122,26 @@ const plugin: JupyterFrontEndPlugin<void> = {
         if (panel.isDisposed) {
           return;
         }
-        const connector = new KernelConnector(panel.sessionContext);
-        promptCellManager.setupNotebook(panel, connector);
+        
+        // Add toolbar button for inserting prompt cells
+        const button = new ToolbarButton({
+          icon: addIcon,
+          onClick: () => {
+            promptCellManager.insertPromptCell(panel);
+          },
+          tooltip: 'Insert AI Prompt Cell (Cmd/Ctrl+Shift+P)',
+          label: 'AI Prompt'
+        });
+        panel.toolbar.insertAfter('cellType', 'ai-jup-insert', button);
+        
+        // Use requestAnimationFrame to wait for cells to be rendered
+        requestAnimationFrame(() => {
+          if (panel.isDisposed) {
+            return;
+          }
+          const connector = new KernelConnector(panel.sessionContext);
+          promptCellManager.setupNotebook(panel, connector);
+        });
       };
       if (panel.context.isReady) {
         doSetup();

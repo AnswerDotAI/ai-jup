@@ -150,7 +150,7 @@ clean:
     rm -rf dist/ *.egg-info/
 
 # Install extension into JupyterLab (development mode with live reload)
-install:
+install: build
     pip install -e ".[test]"
     jupyter labextension develop . --overwrite
     @echo ""

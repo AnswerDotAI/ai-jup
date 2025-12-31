@@ -55,6 +55,7 @@
     "@jupyterlab/codeeditor": "^4.0.0",
     "@jupyterlab/codemirror": "^4.0.0",
     "@jupyterlab/coreutils": "^6.0.0",
+    "@jupyterlab/mainmenu": "^4.0.0",
     "@jupyterlab/notebook": "^4.0.0",
     "@jupyterlab/rendermime": "^4.0.0",
     "@jupyterlab/services": "^7.0.0",

@@ -40,6 +40,9 @@ Thumbs.db
 venv/
 env/
 
+# Demo cloned repos
+fastcore/
+
 # Coverage
 .coverage
 htmlcov/

@@ -91,6 +91,39 @@
   }
 }
 
+/* Convert to Cells button container */
+.ai-jup-convert-button-container {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 12px;
+  background: var(--jp-layout-color2, #f5f5f5);
+  border-top: 1px solid var(--jp-border-color2, #e0e0e0);
+}
+
+.ai-jup-convert-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--jp-ui-font-color1, #333);
+  background: var(--jp-layout-color1, #fff);
+  border: 1px solid var(--jp-border-color1, #ccc);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+}
+
+.ai-jup-convert-button:hover {
+  background: var(--jp-layout-color3, #eee);
+  border-color: var(--jp-brand-color1, #1976d2);
+}
+
+.ai-jup-convert-button:active {
+  background: var(--jp-brand-color3, #bbdefb);
+}
+
 /* Dark theme adjustments */
 [data-jp-theme-light='false'] .ai-jup-prompt-cell {
   background-color: var(--jp-layout-color1, #1e1e1e);
@@ -106,4 +139,18 @@
 
 [data-jp-theme-light='false'] .ai-jup-prompt-output .jp-Cell-inputWrapper {
   background-color: rgba(76, 175, 80, 0.1);
+}
+
+[data-jp-theme-light='false'] .ai-jup-convert-button-container {
+  background: var(--jp-layout-color2, #2d2d2d);
+}
+
+[data-jp-theme-light='false'] .ai-jup-convert-button {
+  color: var(--jp-ui-font-color1, #e0e0e0);
+  background: var(--jp-layout-color1, #1e1e1e);
+  border-color: var(--jp-border-color1, #555);
+}
+
+[data-jp-theme-light='false'] .ai-jup-convert-button:hover {
+  background: var(--jp-layout-color3, #3d3d3d);
 }

@@ -72,7 +72,9 @@ class PromptHandler(APIHandler):
             
             while True:
                 current_tool_call = None
+                current_text_block = None
                 tool_input_buffer = ""
+                text_buffer = ""
                 assistant_content = []
                 
                 with client.messages.stream(
@@ -87,6 +89,7 @@ class PromptHandler(APIHandler):
                             if event.type == 'content_block_delta':
                                 # Handle both text and tool input deltas
                                 if hasattr(event.delta, 'text'):
+                                    text_buffer += event.delta.text
                                     await self._write_sse({"text": event.delta.text})
                                 if hasattr(event.delta, 'partial_json') and current_tool_call:
                                     tool_input_buffer += event.delta.partial_json
@@ -106,14 +109,14 @@ class PromptHandler(APIHandler):
                                             }
                                         })
                                     elif event.content_block.type == 'text':
-                                        pass  # Text content handled in deltas
+                                        current_text_block = True
+                                        text_buffer = ""
                             elif event.type == 'content_block_stop':
                                 # Capture completed content blocks for message history
                                 if current_tool_call:
                                     try:
                                         tool_args = json.loads(tool_input_buffer or "{}")
                                     except json.JSONDecodeError:
-                                        # Mark as invalid so we can error later
                                         tool_args = {"__invalid_json__": True, "__raw__": tool_input_buffer}
                                     assistant_content.append({
                                         "type": "tool_use",
@@ -121,87 +124,103 @@ class PromptHandler(APIHandler):
                                         "name": current_tool_call["name"],
                                         "input": tool_args
                                     })
-                                    # Reset for potential next tool block
                                     current_tool_call = None
                                     tool_input_buffer = ""
+                                elif current_text_block and text_buffer:
+                                    assistant_content.append({
+                                        "type": "text",
+                                        "text": text_buffer
+                                    })
+                                    current_text_block = None
+                                    text_buffer = ""
                             elif event.type == 'message_stop':
                                 pass  # Handled after stream closes
                 
                 # Find tool use blocks in assistant_content
                 tool_use_blocks = [b for b in assistant_content if b.get("type") == "tool_use"]
                 
-                # Check if we should execute tool and loop
+                # Check if we should execute tools and loop
                 if not tool_use_blocks or steps >= max_steps or not kernel:
                     await self._write_sse({"done": True})
                     break
                 
-                # Execute the last tool use block (for now, single tool per iteration)
-                last_tool = tool_use_blocks[-1]
-                tool_name = last_tool["name"]
-                tool_args = last_tool["input"]
+                # Execute ALL tool use blocks and collect results
+                tool_results = []
+                should_break = False
                 
-                # Check for invalid JSON that was marked during parsing
-                if isinstance(tool_args, dict) and tool_args.get("__invalid_json__"):
-                    await self._write_sse({"error": "Invalid tool input JSON"})
+                for tool_block in tool_use_blocks:
+                    tool_name = tool_block["name"]
+                    tool_args = tool_block["input"]
+                    tool_id = tool_block["id"]
+                    
+                    # Check for invalid JSON that was marked during parsing
+                    if isinstance(tool_args, dict) and tool_args.get("__invalid_json__"):
+                        await self._write_sse({"error": f"Invalid tool input JSON for {tool_name}"})
+                        should_break = True
+                        break
+                    
+                    # Validate tool name format (must be a valid Python identifier)
+                    if not TOOL_NAME_RE.match(tool_name):
+                        await self._write_sse({"error": f"Invalid tool name: {tool_name}"})
+                        should_break = True
+                        break
+                    
+                    # Validate tool name against registered functions
+                    if tool_name not in functions:
+                        await self._write_sse({"error": f"Unknown tool: {tool_name}"})
+                        should_break = True
+                        break
+                    
+                    # Execute tool in kernel
+                    tool_result = await self._execute_tool_in_kernel(kernel, tool_name, tool_args)
+                    
+                    # Stream tool result to frontend
+                    await self._write_sse({
+                        "tool_result": {
+                            "id": tool_id,
+                            "name": tool_name,
+                            "result": tool_result
+                        }
+                    })
+                    
+                    # Format result content for LLM context
+                    if tool_result.get("status") == "error":
+                        result_text = f"Error: {tool_result.get('error', 'Unknown error')}"
+                    else:
+                        result_content = tool_result.get("result", {})
+                        if isinstance(result_content, dict):
+                            if result_content.get("type") == "text":
+                                result_text = result_content.get("content", "")
+                            elif result_content.get("type") == "html":
+                                result_text = f"[HTML output: {len(result_content.get('content', ''))} chars]"
+                            elif result_content.get("type") == "image":
+                                result_text = "[Image output]"
+                            else:
+                                result_text = json.dumps(result_content)
+                        else:
+                            result_text = str(result_content)
+                    
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": result_text
+                    })
+                
+                if should_break:
                     await self._write_sse({"done": True})
                     break
-                
-                # Validate tool name format (must be a valid Python identifier)
-                if not TOOL_NAME_RE.match(tool_name):
-                    await self._write_sse({"error": f"Invalid tool name: {tool_name}"})
-                    await self._write_sse({"done": True})
-                    break
-                
-                # Validate tool name against registered functions
-                if tool_name not in functions:
-                    await self._write_sse({"error": f"Unknown tool: {tool_name}"})
-                    await self._write_sse({"done": True})
-                    break
-                
-                # Execute tool in kernel
-                tool_result = await self._execute_tool_in_kernel(kernel, tool_name, tool_args)
-                
-                # Stream tool result to frontend
-                await self._write_sse({
-                    "tool_result": {
-                        "id": last_tool["id"],
-                        "name": tool_name,
-                        "result": tool_result
-                    }
-                })
                 
                 # Build messages for next LLM call
-                # Add assistant message with tool use
+                # Add assistant message with ALL tool uses
                 messages.append({
                     "role": "assistant",
                     "content": assistant_content
                 })
                 
-                # Add tool result message
-                # Format result content for LLM context
-                if tool_result.get("status") == "error":
-                    result_text = f"Error: {tool_result.get('error', 'Unknown error')}"
-                else:
-                    result_content = tool_result.get("result", {})
-                    if isinstance(result_content, dict):
-                        if result_content.get("type") == "text":
-                            result_text = result_content.get("content", "")
-                        elif result_content.get("type") == "html":
-                            result_text = f"[HTML output: {len(result_content.get('content', ''))} chars]"
-                        elif result_content.get("type") == "image":
-                            result_text = "[Image output]"
-                        else:
-                            result_text = json.dumps(result_content)
-                    else:
-                        result_text = str(result_content)
-                
+                # Add ALL tool results in a single user message
                 messages.append({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": last_tool["id"],
-                        "content": result_text
-                    }]
+                    "content": tool_results
                 })
                 
                 steps += 1
