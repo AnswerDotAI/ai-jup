@@ -682,14 +682,17 @@ function onCellChanged(cell: ICellModel) {
 
 ---
 
+## Decisions
+
+1. **Multi-notebook context**: Not needed for v1 (single notebook only)
+2. **Collaborative editing**: Not supported for v1 (single user)
+
 ## Open Questions
 
 1. ~~**Undo support**: Should accepting changes be undoable?~~ ✅ Designed above
 2. **Conflict resolution**: What if user edits a cell while a patch is pending?
 3. **Output cells**: Should AI be able to propose clearing/modifying outputs?
 4. **Metadata**: Should we expose cell metadata to the AI?
-5. **Multi-notebook**: Support for cross-notebook context?
-6. **Collaborative editing**: How does undo work with multiple users (Yjs)?
 
 ---
 
