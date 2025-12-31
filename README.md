@@ -196,10 +196,24 @@ Tool results are automatically formatted:
 
 ## Keyboard Shortcuts
 
-| Shortcut (Mac) | Shortcut (Windows/Linux) | Action |
-|----------------|--------------------------|--------|
-| `Cmd + Shift + P` | `Ctrl + Shift + P` | Insert new prompt cell below |
-| `Shift + Enter` | `Shift + Enter` | Execute prompt cell |
+JupyterLab has two modes:
+- **Command mode** (blue cell border): Press `Esc` to enter. Navigate and manage cells.
+- **Edit mode** (green cell border): Press `Enter` to enter. Edit cell contents.
+
+### Command Mode Shortcuts
+
+Just like `M` converts a cell to Markdown and `Y` converts to code, you can use:
+
+| Shortcut | Action |
+|----------|--------|
+| `P` | Convert current cell to AI prompt cell |
+| `Cmd + Shift + P` (Mac) / `Ctrl + Shift + P` (Windows/Linux) | Insert new prompt cell below |
+
+### Edit Mode Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Shift + Enter` | Execute prompt cell (streams AI response) |
 
 ## Configuration
 
