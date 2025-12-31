@@ -222,5 +222,56 @@ class TestInvalidToolInputJSON:
         mock_execute_tool.assert_not_called()
 
 
+class TestInvalidToolArgumentName:
+    """Tests for invalid tool argument names (prevents injection via kwargs)."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_argument_key_produces_error(self, handler):
+        content_block = MockContentBlock(block_type="tool_use", name="calc", block_id="tool_1")
+        tool_input = json.dumps(
+            {'x); __import__("os").system("echo injected"); #': 1}
+        )
+        mock_events = [
+            MockEvent("content_block_start", content_block=content_block),
+            MockEvent("content_block_delta", delta=MockDelta(partial_json=tool_input)),
+            MockEvent("content_block_stop"),
+            MockEvent("message_stop"),
+        ]
+        mock_stream = MockStreamContext(mock_events)
+        mock_client = MagicMock()
+        mock_client.messages.stream.return_value = mock_stream
+
+        mock_kernel = MagicMock()
+        mock_kernel_manager = MagicMock()
+        mock_kernel_manager.get_kernel.return_value = mock_kernel
+        handler.settings["kernel_manager"] = mock_kernel_manager
+
+        handler._json_body = {
+            "prompt": "test",
+            "context": {"functions": {"calc": {"signature": "()", "docstring": "calc", "parameters": {}}}},
+            "kernel_id": "k1",
+            "max_steps": 5,
+        }
+
+        mock_execute_tool = AsyncMock(
+            return_value={"status": "success", "result": {"type": "text", "content": "42"}}
+        )
+
+        with (
+            patch("ai_jup.handlers.HAS_ANTHROPIC", True),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+            patch("ai_jup.handlers.anthropic") as mock_anthropic,
+            patch("ai_jup.handlers.PromptHandler._execute_tool_in_kernel", mock_execute_tool),
+        ):
+            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.NOT_GIVEN = object()
+            await handler.post()
+
+        response = "".join(handler._buffer)
+        assert "Invalid tool argument name" in response
+        assert '{"done": true}' in response
+        mock_execute_tool.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -43,16 +43,24 @@ class MockEvent:
 
 
 class MockStreamContext:
-    """Mock context manager for Anthropic streaming."""
+    """Mock async context manager for Anthropic streaming."""
 
     def __init__(self, events):
         self.events = events
 
-    def __enter__(self):
-        return iter(self.events)
+    async def __aenter__(self):
+        return self
 
-    def __exit__(self, *args):
+    async def __aexit__(self, *args):
         pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.events:
+            raise StopAsyncIteration
+        return self.events.pop(0)
 
 
 class MockRequest:
@@ -188,7 +196,7 @@ class TestStreamingSSE:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -220,7 +228,7 @@ class TestModelParameter:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -242,7 +250,7 @@ class TestModelParameter:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -279,7 +287,7 @@ class TestToolsBuilding:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = "NOT_GIVEN_SENTINEL"
             await handler.post()
 
@@ -304,7 +312,7 @@ class TestToolsBuilding:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = not_given_sentinel
             await handler.post()
 
@@ -338,7 +346,7 @@ class TestToolCallEvent:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -379,7 +387,7 @@ class TestToolInputEvent:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -454,7 +462,7 @@ class TestServerSideToolLoop:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -499,7 +507,7 @@ class TestServerSideToolLoop:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -541,7 +549,7 @@ class TestServerSideToolLoop:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -594,7 +602,7 @@ class TestServerSideToolLoop:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -620,7 +628,7 @@ class TestAnthropicError:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -634,23 +642,35 @@ class TestAnthropicError:
         """Error during stream iteration should be handled gracefully."""
         handler._json_body = {"prompt": "test", "context": {}}
 
-        def failing_iter():
-            yield MockEvent("content_block_delta", delta=MockDelta(text="Hello"))
-            raise Exception("Stream interrupted")
+        class FailingAsyncStream:
+            """Async stream that yields one event then raises."""
+            def __init__(self):
+                self.yielded = False
 
-        mock_stream = MagicMock()
-        mock_stream.__enter__ = MagicMock(return_value=failing_iter())
-        mock_stream.__exit__ = MagicMock(return_value=False)
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.yielded:
+                    self.yielded = True
+                    return MockEvent("content_block_delta", delta=MockDelta(text="Hello"))
+                raise Exception("Stream interrupted")
 
         mock_client = MagicMock()
-        mock_client.messages.stream.return_value = mock_stream
+        mock_client.messages.stream.return_value = FailingAsyncStream()
 
         with (
             patch("ai_jup.handlers.HAS_ANTHROPIC", True),
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -735,7 +755,7 @@ class TestToolNameValidation:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -796,7 +816,7 @@ class TestToolNameValidation:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -874,7 +894,7 @@ class TestToolCallStateReset:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             await handler.post()
 
@@ -916,7 +936,7 @@ class TestStreamClosedError:
             patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
             patch("ai_jup.handlers.anthropic") as mock_anthropic,
         ):
-            mock_anthropic.Anthropic.return_value = mock_client
+            mock_anthropic.AsyncAnthropic.return_value = mock_client
             mock_anthropic.NOT_GIVEN = object()
             # Should not raise - StreamClosedError should be caught
             await handler.post()

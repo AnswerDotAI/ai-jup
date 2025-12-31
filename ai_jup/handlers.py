@@ -18,6 +18,94 @@ except ImportError:
     HAS_ANTHROPIC = False
 
 
+def _validate_tool_args(tool_args):
+    """Validate tool args as a kwargs-compatible dict."""
+    if tool_args is None:
+        return {}
+    if not isinstance(tool_args, dict):
+        raise ValueError("Tool input must be a JSON object")
+    for key in tool_args.keys():
+        if not isinstance(key, str) or not TOOL_NAME_RE.match(key):
+            raise ValueError(f"Invalid tool argument name: {key}")
+    return tool_args
+
+
+def _build_tool_execution_code(tool_name: str, tool_args: dict, timeout: int) -> str:
+    """Build Python code to execute a named function with JSON args safely.
+
+    Tool args are passed as a JSON string and decoded in Python to avoid
+    interpolating untrusted keys/values into executable code.
+    """
+    validated_args = _validate_tool_args(tool_args)
+    args_json_literal = repr(json.dumps(validated_args))
+
+    # Timeout protection uses signal (Unix) with graceful fallback.
+    return f"""
+import json as _json_mod
+import base64 as _b64
+import signal as _signal_mod
+
+def _timeout_handler(*args):
+    raise TimeoutError("Tool execution timed out after {timeout} seconds")
+
+try:
+    # Set up timeout (Unix only, gracefully ignored on Windows)
+    try:
+        _signal_mod.signal(_signal_mod.SIGALRM, _timeout_handler)
+        _signal_mod.alarm({timeout})
+    except (AttributeError, ValueError):
+        pass  # Windows or unsupported platform
+    
+    _fn_name = {json.dumps(tool_name)}
+    _fn = globals().get(_fn_name)
+    if _fn is None or not callable(_fn):
+        raise NameError(f"Tool '{{_fn_name}}' not found or not callable")
+    
+    _args = _json_mod.loads({args_json_literal})
+    if not isinstance(_args, dict):
+        raise TypeError("Tool input must decode to an object")
+    
+    _result = _fn(**_args)
+    
+    # Rich result handling
+    try:
+        # Check savefig FIRST - matplotlib Figures have _repr_html_ that returns None
+        if hasattr(_result, 'savefig'):
+            import io as _io
+            _buf = _io.BytesIO()
+            _result.savefig(_buf, format='png', bbox_inches='tight')
+            _buf.seek(0)
+            _content = {{"type": "image", "format": "png", "content": _b64.b64encode(_buf.getvalue()).decode("ascii")}}
+        elif hasattr(_result, '_repr_png_'):
+            _png_data = _result._repr_png_()
+            if _png_data:
+                _content = {{"type": "image", "format": "png", "content": _b64.b64encode(_png_data).decode("ascii")}}
+            else:
+                _content = {{"type": "text", "content": repr(_result)[:500]}}
+        elif hasattr(_result, '_repr_html_'):
+            _html = _result._repr_html_()
+            if _html:
+                _content = {{"type": "html", "content": _html[:10000]}}
+            else:
+                _content = {{"type": "text", "content": repr(_result)[:500]}}
+        else:
+            _content = {{"type": "text", "content": repr(_result)[:500]}}
+    except Exception as _conv_e:
+        _content = {{"type": "text", "content": "Error: " + str(_conv_e) + " | " + repr(_result)[:500]}}
+    
+    print(_json_mod.dumps({{"result": _content, "status": "success"}}))
+except TimeoutError as _te:
+    print(_json_mod.dumps({{"error": str(_te), "status": "error"}}))
+except Exception as _e:
+    print(_json_mod.dumps({{"error": str(_e), "status": "error"}}))
+finally:
+    try:
+        _signal_mod.alarm(0)  # Cancel the alarm
+    except (AttributeError, ValueError, NameError):
+        pass
+"""
+
+
 class PromptHandler(APIHandler):
     """Handler for AI prompt requests with streaming support."""
 
@@ -58,7 +146,7 @@ class PromptHandler(APIHandler):
                 self.finish({"error": "ANTHROPIC_API_KEY environment variable not set"})
                 return
 
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.AsyncAnthropic(api_key=api_key)
             
             tools = self._build_tools(functions)
             
@@ -79,14 +167,14 @@ class PromptHandler(APIHandler):
                 text_buffer = ""
                 assistant_content = []
                 
-                with client.messages.stream(
+                async with client.messages.stream(
                     model=model,
                     max_tokens=4096,
                     system=system_prompt,
                     messages=messages,
                     tools=tools if tools else anthropic.NOT_GIVEN,
                 ) as stream:
-                    for event in stream:
+                    async for event in stream:
                         if hasattr(event, 'type'):
                             if event.type == 'content_block_delta':
                                 # Handle both text and tool input deltas
@@ -158,6 +246,14 @@ class PromptHandler(APIHandler):
                     # Check for invalid JSON that was marked during parsing
                     if isinstance(tool_args, dict) and tool_args.get("__invalid_json__"):
                         await self._write_sse({"error": f"Invalid tool input JSON for {tool_name}"})
+                        should_break = True
+                        break
+
+                    # Validate tool argument names (kwargs-compatible; prevents code injection via keys)
+                    try:
+                        tool_args = _validate_tool_args(tool_args)
+                    except ValueError as ve:
+                        await self._write_sse({"error": str(ve)})
                         should_break = True
                         break
                     
@@ -257,71 +353,7 @@ class PromptHandler(APIHandler):
         
         Uses timeout protection (from toolslm pattern) to prevent infinite loops.
         """
-        args_str = ", ".join(
-            f"{k}={json.dumps(v)}" for k, v in tool_args.items()
-        )
-        
-        # Timeout protection using signal (Unix) with graceful fallback
-        code = f"""
-import json as _json_mod
-import base64 as _b64
-import signal as _signal_mod
-
-def _timeout_handler(*args):
-    raise TimeoutError("Tool execution timed out after {timeout} seconds")
-
-try:
-    # Set up timeout (Unix only, gracefully ignored on Windows)
-    try:
-        _signal_mod.signal(_signal_mod.SIGALRM, _timeout_handler)
-        _signal_mod.alarm({timeout})
-    except (AttributeError, ValueError):
-        pass  # Windows or unsupported platform
-    
-    _fn_name = {json.dumps(tool_name)}
-    _fn = globals().get(_fn_name)
-    if _fn is None or not callable(_fn):
-        raise NameError(f"Tool '{{_fn_name}}' not found or not callable")
-    
-    _result = _fn({args_str})
-    
-    # Rich result handling
-    try:
-        # Check savefig FIRST - matplotlib Figures have _repr_html_ that returns None
-        if hasattr(_result, 'savefig'):
-            import io as _io
-            _buf = _io.BytesIO()
-            _result.savefig(_buf, format='png', bbox_inches='tight')
-            _buf.seek(0)
-            _content = {{"type": "image", "format": "png", "content": _b64.b64encode(_buf.getvalue()).decode("ascii")}}
-        elif hasattr(_result, '_repr_png_'):
-            _png_data = _result._repr_png_()
-            if _png_data:
-                _content = {{"type": "image", "format": "png", "content": _b64.b64encode(_png_data).decode("ascii")}}
-            else:
-                _content = {{"type": "text", "content": repr(_result)[:500]}}
-        elif hasattr(_result, '_repr_html_'):
-            _html = _result._repr_html_()
-            if _html:
-                _content = {{"type": "html", "content": _html[:10000]}}
-            else:
-                _content = {{"type": "text", "content": repr(_result)[:500]}}
-        else:
-            _content = {{"type": "text", "content": repr(_result)[:500]}}
-    except Exception as _conv_e:
-        _content = {{"type": "text", "content": "Error: " + str(_conv_e) + " | " + repr(_result)[:500]}}
-    
-    print(_json_mod.dumps({{"result": _content, "status": "success"}}))
-except TimeoutError as _te:
-    print(_json_mod.dumps({{"error": str(_te), "status": "error"}}))
-except Exception as _e:
-    print(_json_mod.dumps({{"error": str(_e), "status": "error"}}))
-finally:
-    try:
-        _signal_mod.alarm(0)  # Cancel the alarm
-    except (AttributeError, ValueError, NameError):
-        pass
-"""
+        code = _build_tool_execution_code(tool_name, tool_args, timeout)
         
         output = []
         
@@ -584,7 +616,10 @@ class ToolExecuteHandler(APIHandler):
     @authenticated
     async def post(self):
         """Execute a tool call and return the result."""
-        data = self.get_json_body()
+        data = self.get_json_body() or {}
+        if not isinstance(data, dict):
+            self.finish(json.dumps({"error": "Invalid JSON body", "status": "error"}))
+            return
         tool_name = data.get("name")
         tool_input = data.get("input", {})
         kernel_id = data.get("kernel_id")
@@ -619,6 +654,12 @@ class ToolExecuteHandler(APIHandler):
                 "status": "error"
             }))
             return
+
+        try:
+            tool_input = _validate_tool_args(tool_input)
+        except ValueError as ve:
+            self.finish(json.dumps({"error": str(ve), "status": "error"}))
+            return
         
         # Get kernel manager from settings
         kernel_manager = self.settings.get("kernel_manager")
@@ -639,95 +680,8 @@ class ToolExecuteHandler(APIHandler):
                 }))
                 return
             
-            # Build the function call code with validation and rich result handling
-            args_str = ", ".join(
-                f"{k}={json.dumps(v)}" for k, v in tool_input.items()
-            )
-            
-            # Use globals().get() for safe function lookup instead of direct interpolation
-            # Includes timeout protection (from toolslm pattern)
             timeout = 60  # seconds
-            code = f"""
-import json as _json_mod
-import base64 as _b64
-import signal as _signal_mod
-
-def _timeout_handler(*args):
-    raise TimeoutError("Tool execution timed out after {timeout} seconds")
-
-try:
-    # Set up timeout (Unix only, gracefully ignored on Windows)
-    try:
-        _signal_mod.signal(_signal_mod.SIGALRM, _timeout_handler)
-        _signal_mod.alarm({timeout})
-    except (AttributeError, ValueError):
-        pass  # Windows or unsupported platform
-    
-    _fn_name = {json.dumps(tool_name)}
-    _fn = globals().get(_fn_name)
-    if _fn is None or not callable(_fn):
-        raise NameError(f"Tool '{{_fn_name}}' not found or not callable")
-    
-    _result = _fn({args_str})
-    
-    # Rich result handling
-    try:
-        # 1. Matplotlib-like figures with savefig() - check FIRST since they have _repr_html_ that returns None
-        if hasattr(_result, 'savefig'):
-            import io as _io
-            _buf = _io.BytesIO()
-            _result.savefig(_buf, format='png', bbox_inches='tight')
-            _buf.seek(0)
-            _content = {{
-                "type": "image",
-                "format": "png",
-                "content": _b64.b64encode(_buf.getvalue()).decode("ascii")
-            }}
-        # 2. Objects that expose PNG directly
-        elif hasattr(_result, '_repr_png_'):
-            _png_data = _result._repr_png_()
-            if _png_data:
-                _content = {{
-                    "type": "image",
-                    "format": "png",
-                    "content": _b64.b64encode(_png_data).decode("ascii")
-                }}
-            else:
-                _content = {{"type": "text", "content": repr(_result)[:500]}}
-        # 3. Rich HTML (DataFrame, IPython objects, etc.) - check that it returns non-None
-        elif hasattr(_result, '_repr_html_'):
-            _html = _result._repr_html_()
-            if _html:
-                _content = {{
-                    "type": "html",
-                    "content": _html[:10000]
-                }}
-            else:
-                _content = {{"type": "text", "content": repr(_result)[:500]}}
-        # 4. Fallback to text repr
-        else:
-            _repr = repr(_result)[:500]
-            _content = {{
-                "type": "text",
-                "content": _repr
-            }}
-    except Exception as _conv_e:
-        _content = {{
-            "type": "text",
-            "content": "Error converting result: " + str(_conv_e) + " | repr: " + repr(_result)[:500]
-        }}
-    
-    print(_json_mod.dumps({{"result": _content, "status": "success"}}))
-except TimeoutError as _te:
-    print(_json_mod.dumps({{"error": str(_te), "status": "error"}}))
-except Exception as _e:
-    print(_json_mod.dumps({{"error": str(_e), "status": "error"}}))
-finally:
-    try:
-        _signal_mod.alarm(0)  # Cancel the alarm
-    except (AttributeError, ValueError, NameError):
-        pass
-"""
+            code = _build_tool_execution_code(tool_name, tool_input, timeout)
             
             # Execute code and capture output
             output = []

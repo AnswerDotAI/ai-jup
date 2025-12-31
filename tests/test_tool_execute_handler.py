@@ -113,6 +113,22 @@ class TestToolExecuteValidation:
         assert result == {"error": "Tool 'forbidden_func' is not in allowed tools", "status": "error"}
 
     @pytest.mark.asyncio
+    async def test_invalid_tool_argument_name_rejected(self, mock_handler):
+        """Tool arg keys must be kwargs-compatible identifiers."""
+        mock_handler.get_json_body.return_value = {
+            "name": "test_func",
+            "input": {"bad-key": 1},
+            "kernel_id": "test-kernel",
+        }
+
+        await ToolExecuteHandler.post(mock_handler)
+
+        mock_handler.finish.assert_called_once()
+        result = json.loads(mock_handler.finish.call_args[0][0])
+        assert result["status"] == "error"
+        assert "Invalid tool argument name" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_invalid_tool_name_format_rejected(self, mock_handler):
         """POST with invalid tool name format returns error."""
         mock_handler.get_json_body.return_value = {
