@@ -28,6 +28,12 @@ const config: PlaywrightTestConfig = {
     baseURL: process.env.TARGET_URL ?? 'http://localhost:8888',
     trace: 'on-first-retry',
     video: 'retain-on-failure',
+    // Disable windowing mode to prevent minimap button from intercepting cell clicks
+    mockSettings: {
+      '@jupyterlab/notebook-extension:tracker': {
+        windowingMode: 'none'
+      }
+    }
   },
   webServer: {
     command: 'jupyter lab --config jupyter_server_test_config.py',

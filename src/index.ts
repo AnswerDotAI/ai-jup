@@ -12,33 +12,103 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 
-import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { ICommandPalette, ToolbarButton } from '@jupyterlab/apputils';
+import { INotebookTracker, NotebookPanel, INotebookWidgetFactory, NotebookWidgetFactory } from '@jupyterlab/notebook';
+import { ICommandPalette, ToolbarButton, IToolbarWidgetRegistry } from '@jupyterlab/apputils';
 import { IMainMenu } from '@jupyterlab/mainmenu';
+import { ISettingRegistry } from '@jupyterlab/settingregistry';
+import { ITranslator } from '@jupyterlab/translation';
 import { addIcon } from '@jupyterlab/ui-components';
 import { PromptCellManager } from './promptCell';
 import { KernelConnector } from './kernelConnector';
+import { SettingsManager } from './settings';
+import { CustomCellTypeSwitcher } from './cellTypeSwitcher';
+import {
+  IPromptCellManager,
+  IExtensionSettings,
+  IKernelConnectorFactory
+} from './tokens';
 
 const PLUGIN_ID = 'ai-jup:plugin';
 
 /**
- * Initialization data for the ai-jup extension.
+ * Settings plugin that provides IExtensionSettings.
  */
-const plugin: JupyterFrontEndPlugin<void> = {
+const settingsPlugin: JupyterFrontEndPlugin<IExtensionSettings> = {
+  id: 'ai-jup:settings',
+  description: 'Provides AI-Jup extension settings',
+  autoStart: true,
+  requires: [],
+  optional: [ISettingRegistry],
+  provides: IExtensionSettings,
+  activate: async (
+    app: JupyterFrontEnd,
+    settingRegistry: ISettingRegistry | null
+  ): Promise<IExtensionSettings> => {
+    const settingsManager = new SettingsManager();
+    
+    if (settingRegistry) {
+      await settingsManager.initialize(settingRegistry);
+      console.log('[ai-jup] Settings loaded:', settingsManager.toJSON());
+    } else {
+      console.log('[ai-jup] No setting registry available, using defaults');
+    }
+    
+    return settingsManager;
+  }
+};
+
+/**
+ * Kernel connector factory plugin.
+ */
+const kernelConnectorPlugin: JupyterFrontEndPlugin<IKernelConnectorFactory> = {
+  id: 'ai-jup:kernel-connector',
+  description: 'Provides kernel connector factory',
+  autoStart: true,
+  provides: IKernelConnectorFactory,
+  activate: (): IKernelConnectorFactory => {
+    return {
+      create: (sessionContext: unknown) => new KernelConnector(sessionContext as import('@jupyterlab/apputils').ISessionContext)
+    };
+  }
+};
+
+/**
+ * Prompt cell manager plugin.
+ */
+const promptCellManagerPlugin: JupyterFrontEndPlugin<IPromptCellManager> = {
+  id: 'ai-jup:prompt-cell-manager',
+  description: 'Manages AI prompt cells',
+  autoStart: true,
+  requires: [IExtensionSettings],
+  provides: IPromptCellManager,
+  activate: (
+    app: JupyterFrontEnd,
+    settings: IExtensionSettings
+  ): IPromptCellManager => {
+    const manager = new PromptCellManager();
+    manager.setSettings(settings);
+    return manager;
+  }
+};
+
+/**
+ * Main plugin that sets up commands and UI.
+ */
+const mainPlugin: JupyterFrontEndPlugin<void> = {
   id: PLUGIN_ID,
   description: 'AI-powered prompt cells for JupyterLab',
   autoStart: true,
-  requires: [INotebookTracker],
+  requires: [INotebookTracker, IPromptCellManager, IKernelConnectorFactory],
   optional: [ICommandPalette, IMainMenu],
   activate: (
     app: JupyterFrontEnd,
     notebookTracker: INotebookTracker,
+    promptCellManager: IPromptCellManager,
+    connectorFactory: IKernelConnectorFactory,
     palette: ICommandPalette | null,
     mainMenu: IMainMenu | null
   ) => {
     console.log('AI-Jup extension activated');
-
-    const promptCellManager = new PromptCellManager();
 
     // Command to insert a new prompt cell
     const insertPromptCommand = 'ai-jup:insert-prompt-cell';
@@ -139,7 +209,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
           if (panel.isDisposed) {
             return;
           }
-          const connector = new KernelConnector(panel.sessionContext);
+          const connector = connectorFactory.create(panel.sessionContext);
           promptCellManager.setupNotebook(panel, connector);
         });
       };
@@ -158,4 +228,35 @@ const plugin: JupyterFrontEndPlugin<void> = {
   }
 };
 
-export default plugin;
+/**
+ * Plugin that replaces the cell type dropdown with one that includes "Prompt".
+ */
+const cellTypeSwitcherPlugin: JupyterFrontEndPlugin<void> = {
+  id: 'ai-jup:cell-type-switcher',
+  description: 'Adds Prompt option to cell type dropdown',
+  autoStart: true,
+  requires: [IToolbarWidgetRegistry, IPromptCellManager, INotebookWidgetFactory],
+  optional: [ITranslator],
+  activate: (
+    app: JupyterFrontEnd,
+    toolbarRegistry: IToolbarWidgetRegistry,
+    promptCellManager: IPromptCellManager,
+    _notebookWidgetFactory: NotebookWidgetFactory.IFactory,
+    translator: ITranslator | null
+  ) => {
+    console.log('[ai-jup] Registering custom cell type switcher (after notebook widget factory)');
+    
+    const oldFactory = toolbarRegistry.addFactory<NotebookPanel>(
+      'Notebook',
+      'cellType',
+      (panel: NotebookPanel) => {
+        console.log('[ai-jup] Creating CustomCellTypeSwitcher for panel:', panel.id);
+        return new CustomCellTypeSwitcher(panel, promptCellManager, translator ?? undefined);
+      }
+    );
+    
+    console.log('[ai-jup] Replaced cellType factory, old factory was:', oldFactory ? 'present' : 'none');
+  }
+};
+
+export default [settingsPlugin, kernelConnectorPlugin, promptCellManagerPlugin, cellTypeSwitcherPlugin, mainPlugin];

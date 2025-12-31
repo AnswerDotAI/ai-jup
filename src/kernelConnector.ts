@@ -4,32 +4,21 @@
 
 import { ISessionContext } from '@jupyterlab/apputils';
 import { KernelMessage } from '@jupyterlab/services';
+import {
+  IKernelConnector,
+  IKernelConnectorFactory,
+  IVariableInfo,
+  IFunctionInfo
+} from './tokens';
 
-export interface VariableInfo {
-  name: string;
-  type: string;
-  repr: string;
-  value?: unknown;
-}
-
-export interface FunctionInfo {
-  name: string;
-  signature: string;
-  docstring: string;
-  parameters: Record<string, ParameterInfo>;
-  return_type?: string;
-}
-
-export interface ParameterInfo {
-  type: string;
-  description: string;
-  default?: string;
-}
+export type { IVariableInfo as VariableInfo, IFunctionInfo as FunctionInfo };
+export type { IParameterInfo as ParameterInfo } from './tokens';
 
 /**
  * Connects to a Jupyter kernel to introspect variables and functions.
+ * Implements IKernelConnector for dependency injection.
  */
-export class KernelConnector {
+export class KernelConnector implements IKernelConnector {
   private _session: ISessionContext;
 
   constructor(session: ISessionContext) {
@@ -101,7 +90,7 @@ export class KernelConnector {
   /**
    * Get the value of a variable by name.
    */
-  async getVariable(name: string): Promise<VariableInfo | null> {
+  async getVariable(name: string): Promise<IVariableInfo | null> {
     const code = `
 import json as _json_mod
 try:
@@ -127,7 +116,7 @@ except Exception as _e:
         console.warn(`Error getting variable ${name}:`, result.error);
         return null;
       }
-      return result as VariableInfo;
+      return result as IVariableInfo;
     } catch (e) {
       console.error(`Failed to get variable ${name}:`, e);
       return null;
@@ -138,7 +127,7 @@ except Exception as _e:
    * Get information about a function.
    * Parses numpy/Google-style docstrings for parameter descriptions.
    */
-  async getFunction(name: string): Promise<FunctionInfo | null> {
+  async getFunction(name: string): Promise<IFunctionInfo | null> {
     const code = `
 import json as _json_mod
 import inspect as _inspect_mod
@@ -259,11 +248,20 @@ except Exception as _e:
         console.warn(`Error getting function ${name}:`, result.error);
         return null;
       }
-      return result as FunctionInfo;
+      return result as IFunctionInfo;
     } catch (e) {
       console.error(`Failed to get function ${name}:`, e);
       return null;
     }
   }
+}
 
+/**
+ * Factory for creating KernelConnector instances.
+ * Implements IKernelConnectorFactory for dependency injection.
+ */
+export class KernelConnectorFactory implements IKernelConnectorFactory {
+  create(sessionContext: ISessionContext): IKernelConnector {
+    return new KernelConnector(sessionContext);
+  }
 }

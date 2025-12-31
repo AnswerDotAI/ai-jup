@@ -1,0 +1,46 @@
+{
+  "title": "AI-Jup Settings",
+  "description": "Settings for the AI-Jup extension",
+  "type": "object",
+  "jupyter.lab.setting-icon": "ui-components:add",
+  "jupyter.lab.setting-icon-label": "AI-Jup",
+  "properties": {
+    "defaultModel": {
+      "type": "string",
+      "title": "Default Model",
+      "description": "The default AI model to use for prompt cells",
+      "default": "claude-sonnet-4-20250514",
+      "enum": [
+        "claude-sonnet-4-20250514",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-haiku-20240307"
+      ],
+      "enumNames": [
+        "Claude Sonnet 4 (Latest)",
+        "Claude 3.5 Sonnet",
+        "Claude 3 Haiku (Fast)"
+      ]
+    },
+    "maxToolSteps": {
+      "type": "integer",
+      "title": "Maximum Tool Steps",
+      "description": "Maximum number of tool execution iterations per prompt",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 20
+    },
+    "showConvertButton": {
+      "type": "boolean",
+      "title": "Show Convert Button",
+      "description": "Show the 'Convert to Cells' button on AI responses",
+      "default": true
+    },
+    "streamingEnabled": {
+      "type": "boolean",
+      "title": "Enable Streaming",
+      "description": "Stream AI responses as they are generated (recommended)",
+      "default": true
+    }
+  },
+  "additionalProperties": false
+}

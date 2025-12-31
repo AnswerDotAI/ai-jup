@@ -4,15 +4,32 @@
 
 import { NotebookPanel, NotebookActions } from '@jupyterlab/notebook';
 import { Cell, ICellModel, MarkdownCell } from '@jupyterlab/cells';
-import { PageConfig } from '@jupyterlab/coreutils';
-import { KernelConnector, VariableInfo, FunctionInfo } from './kernelConnector';
+import { ICodeCellModel, isCodeCellModel } from '@jupyterlab/cells';
+import type {
+  IPromptCellManager,
+  IKernelConnector,
+  IPromptModel,
+  IPromptContext,
+  IVariableInfo,
+  IFunctionInfo,
+  IExtensionSettings,
+  IImageContext,
+  IChartSpec
+} from './tokens';
 import { parsePrompt, processPrompt } from './promptParser';
-import { renderToolResult } from './toolResultRenderer';
+import { PromptModel } from './promptModel';
+
+/** Supported image MIME types for multimodal context */
+const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif'] as const;
+type ImageMimeType = (typeof IMAGE_MIME_TYPES)[number];
+
+/** MIME type patterns for declarative chart specs */
+const VEGALITE_MIME_PATTERN = /^application\/vnd\.vegalite\.v\d+\+json$/;
+const PLOTLY_MIME = 'application/vnd.plotly.v1+json';
 
 const PROMPT_CELL_CLASS = 'ai-jup-prompt-cell';
 const PROMPT_OUTPUT_CLASS = 'ai-jup-prompt-output';
 const PROMPT_METADATA_KEY = 'ai_jup';
-const ACTIVE_REQUEST_KEY = 'ai_jup_active_request';
 
 interface PromptMetadata {
   isPromptCell: boolean;
@@ -21,14 +38,23 @@ interface PromptMetadata {
 
 /**
  * Manages prompt cells within notebooks.
+ * Implements IPromptCellManager for dependency injection.
  */
-export class PromptCellManager {
-  private _connectors: Map<string, KernelConnector> = new Map();
+export class PromptCellManager implements IPromptCellManager {
+  private _connectors: Map<string, IKernelConnector> = new Map();
+  private _settings: IExtensionSettings | null = null;
+
+  /**
+   * Set the settings instance.
+   */
+  setSettings(settings: IExtensionSettings): void {
+    this._settings = settings;
+  }
 
   /**
    * Set up a notebook for prompt cell handling.
    */
-  setupNotebook(panel: NotebookPanel, connector: KernelConnector): void {
+  setupNotebook(panel: NotebookPanel, connector: IKernelConnector): void {
     const notebookId = panel.id;
     this._connectors.set(notebookId, connector);
 
@@ -44,7 +70,7 @@ export class PromptCellManager {
       
       for (let i = 0; i < cellCount; i++) {
         const cellModel = notebook.model.cells.get(i);
-        if (this._isPromptCell(cellModel)) {
+        if (this._isPromptCellModel(cellModel)) {
           console.log(`[ai-jup] Found prompt cell at index ${i}`);
           // Widget may not exist yet due to windowing, check bounds
           if (i < notebook.widgets.length) {
@@ -132,7 +158,7 @@ export class PromptCellManager {
     const notebook = panel.content;
     const activeCell = notebook.activeCell;
 
-    if (!activeCell || !this._isPromptCell(activeCell.model)) {
+    if (!activeCell || !this._isPromptCellModel(activeCell.model)) {
       console.log('Not a prompt cell');
       return;
     }
@@ -143,9 +169,10 @@ export class PromptCellManager {
       return;
     }
 
-    // Get model from cell metadata
+    // Get model from cell metadata or settings
     const metadata = activeCell.model.getMetadata(PROMPT_METADATA_KEY) as PromptMetadata | undefined;
-    const model = metadata?.model || 'claude-sonnet-4-20250514';
+    const defaultModel = this._settings?.defaultModel ?? 'claude-sonnet-4-20250514';
+    const model = metadata?.model || defaultModel;
 
     // Get kernel ID for tool execution
     const kernelId = panel.sessionContext.session?.kernel?.id;
@@ -165,7 +192,7 @@ export class PromptCellManager {
     // Process the prompt (substitute variables)
     const variableValues: Record<string, string> = {};
     for (const [name, info] of Object.entries(context.variables)) {
-      variableValues[name] = (info as VariableInfo).repr;
+      variableValues[name] = (info as IVariableInfo).repr;
     }
     const processedPrompt = processPrompt(cleanPrompt, variableValues);
 
@@ -173,7 +200,7 @@ export class PromptCellManager {
     const outputCell = this._insertOutputCell(panel, activeCell);
 
     // Call the AI backend
-    await this._callAI(panel, processedPrompt, context, outputCell, model, kernelId, connector);
+    await this._callAI(panel, processedPrompt, context, outputCell, model, kernelId);
   }
 
   /**
@@ -181,27 +208,36 @@ export class PromptCellManager {
    */
   private async _gatherContext(
     panel: NotebookPanel,
-    connector: KernelConnector,
+    connector: IKernelConnector,
     parsed: ReturnType<typeof parsePrompt>
-  ): Promise<{
-    preceding_code: string;
-    variables: Record<string, VariableInfo>;
-    functions: Record<string, FunctionInfo>;
-  }> {
+  ): Promise<IPromptContext> {
     const notebook = panel.content;
     const activeIndex = notebook.activeCellIndex;
 
-    // Get preceding code cells
+    // Get preceding code cells and extract images/chart specs from outputs
     const precedingCode: string[] = [];
+    const images: IImageContext[] = [];
+    const chartSpecs: IChartSpec[] = [];
+
     for (let i = 0; i < activeIndex; i++) {
       const cell = notebook.widgets[i];
-      if (cell.model.type === 'code') {
-        precedingCode.push(cell.model.sharedModel.getSource());
+      const cellModel = cell.model;
+
+      if (cellModel.type === 'code') {
+        precedingCode.push(cellModel.sharedModel.getSource());
+        // Extract images and chart specs from code cell outputs
+        if (isCodeCellModel(cellModel)) {
+          this._extractImagesFromCodeCell(cellModel, i, images);
+          this._extractChartSpecsFromCodeCell(cellModel, i, chartSpecs);
+        }
+      } else if (cellModel.type === 'markdown') {
+        // Extract images from markdown cell attachments
+        this._extractImagesFromMarkdownCell(cellModel, i, images);
       }
     }
 
     // Get referenced variables
-    const variables: Record<string, VariableInfo> = {};
+    const variables: Record<string, IVariableInfo> = {};
     for (const varName of parsed.variables) {
       const info = await connector.getVariable(varName);
       if (info) {
@@ -210,7 +246,7 @@ export class PromptCellManager {
     }
 
     // Get referenced functions
-    const functions: Record<string, FunctionInfo> = {};
+    const functions: Record<string, IFunctionInfo> = {};
     for (const funcName of parsed.functions) {
       const info = await connector.getFunction(funcName);
       if (info) {
@@ -221,8 +257,126 @@ export class PromptCellManager {
     return {
       preceding_code: precedingCode.join('\n\n'),
       variables,
-      functions
+      functions,
+      images: images.length > 0 ? images : undefined,
+      chartSpecs: chartSpecs.length > 0 ? chartSpecs : undefined
     };
+  }
+
+  /**
+   * Extract images from code cell outputs.
+   */
+  private _extractImagesFromCodeCell(
+    cellModel: ICodeCellModel,
+    cellIndex: number,
+    images: IImageContext[]
+  ): void {
+    const outputs = cellModel.outputs;
+    if (!outputs) {
+      return;
+    }
+
+    for (let j = 0; j < outputs.length; j++) {
+      const outputModel = outputs.get(j);
+      const data = outputModel.data;
+
+      // Check each supported image MIME type
+      for (const mimeType of IMAGE_MIME_TYPES) {
+        const imageData = data[mimeType];
+        if (imageData && typeof imageData === 'string') {
+          images.push({
+            data: imageData,
+            mimeType: mimeType as ImageMimeType,
+            source: 'output',
+            cellIndex
+          });
+          break; // Only take the first matching image type per output
+        }
+      }
+    }
+  }
+
+  /**
+   * Extract images from markdown cell attachments.
+   */
+  private _extractImagesFromMarkdownCell(
+    cellModel: ICellModel,
+    cellIndex: number,
+    images: IImageContext[]
+  ): void {
+    // Attachments are stored in cell metadata under 'attachments'
+    const attachments = cellModel.getMetadata('attachments') as
+      | Record<string, Record<string, string>>
+      | undefined;
+
+    if (!attachments) {
+      return;
+    }
+
+    // Iterate through each attachment
+    for (const [_filename, mimeData] of Object.entries(attachments)) {
+      if (!mimeData || typeof mimeData !== 'object') {
+        continue;
+      }
+
+      // Check each supported image MIME type
+      for (const mimeType of IMAGE_MIME_TYPES) {
+        const imageData = mimeData[mimeType];
+        if (imageData && typeof imageData === 'string') {
+          images.push({
+            data: imageData,
+            mimeType: mimeType as ImageMimeType,
+            source: 'attachment',
+            cellIndex
+          });
+          break; // Only take the first matching image type per attachment
+        }
+      }
+    }
+  }
+
+  /**
+   * Extract chart specs (Vega-Lite, Plotly) from code cell outputs.
+   */
+  private _extractChartSpecsFromCodeCell(
+    cellModel: ICodeCellModel,
+    cellIndex: number,
+    chartSpecs: IChartSpec[]
+  ): void {
+    const outputs = cellModel.outputs;
+    if (!outputs) {
+      return;
+    }
+
+    for (let j = 0; j < outputs.length; j++) {
+      const outputModel = outputs.get(j);
+      const data = outputModel.data;
+
+      // Check for Vega-Lite specs (Altair outputs)
+      for (const mimeType of Object.keys(data)) {
+        if (VEGALITE_MIME_PATTERN.test(mimeType)) {
+          const specData = data[mimeType];
+          if (specData && typeof specData === 'object') {
+            chartSpecs.push({
+              type: 'vega-lite',
+              spec: specData as Record<string, unknown>,
+              cellIndex
+            });
+          }
+          break;
+        }
+      }
+
+      // Check for Plotly specs
+      const plotlyData = data[PLOTLY_MIME];
+      if (plotlyData && typeof plotlyData === 'object') {
+        chartSpecs.push({
+          type: 'plotly',
+          spec: plotlyData as Record<string, unknown>,
+          cellIndex
+        });
+      }
+    }
   }
 
   /**
@@ -266,162 +420,49 @@ export class PromptCellManager {
   }
 
   /**
-   * Call the AI backend and stream the response.
-   * Now supports server-side tool loop with max_steps.
+   * Call the AI backend and stream the response using signal-based PromptModel.
    */
   private async _callAI(
     panel: NotebookPanel,
     prompt: string,
-    context: {
-      preceding_code: string;
-      variables: Record<string, VariableInfo>;
-      functions: Record<string, FunctionInfo>;
-    },
+    context: IPromptContext,
     outputCell: Cell,
     model: string,
-    kernelId: string | undefined,
-    connector: KernelConnector
+    kernelId: string | undefined
   ): Promise<void> {
-    // Prevent concurrent requests on the same output cell
-    const existingRequest = outputCell.model.getMetadata(ACTIVE_REQUEST_KEY);
-    if (existingRequest) {
-      console.log('Request already in progress for this cell');
-      return;
-    }
-    outputCell.model.setMetadata(ACTIVE_REQUEST_KEY, true);
+    // Create or get a PromptModel for this execution
+    const promptModel = new PromptModel();
 
-    const baseUrl = PageConfig.getBaseUrl().replace(/\/$/, '');
-    const url = `${baseUrl}/ai-jup/prompt`;
+    // Connect output changes to cell updates
+    const onOutputChanged = (_: IPromptModel, output: string) => {
+      if (!outputCell.isDisposed) {
+        outputCell.model.sharedModel.setSource(output);
+      }
+    };
+    promptModel.outputChanged.connect(onOutputChanged);
 
-    // Get XSRF token from cookie
-    const xsrfToken = document.cookie
-      .split('; ')
-      .find(row => row.startsWith('_xsrf='))
-      ?.split('=')[1] || '';
-
-    // Set up abort controller to cancel request if cell is disposed
-    const controller = new AbortController();
-    const abortOnDispose = () => controller.abort();
+    // Abort on cell disposal
+    const abortOnDispose = () => promptModel.abort();
     outputCell.disposed.connect(abortOnDispose);
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-XSRFToken': xsrfToken
-        },
-        body: JSON.stringify({
-          prompt,
-          model,
-          kernel_id: kernelId,
-          max_steps: 5, // Enable server-side tool loop
-          context: {
-            preceding_code: context.preceding_code,
-            variables: context.variables,
-            functions: context.functions
-          }
-        }),
-        credentials: 'include',
-        signal: controller.signal
+      const maxSteps = this._settings?.maxToolSteps ?? 5;
+      
+      await promptModel.executePrompt(prompt, context, {
+        model,
+        kernelId,
+        maxSteps
       });
-
-      if (!response.ok) {
-        // Try to extract error message from JSON response body
-        let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
-        try {
-          const errorBody = await response.json();
-          if (errorBody.error) {
-            errorMessage = errorBody.error;
-          }
-        } catch {
-          // Response wasn't JSON, use default message
-        }
-        throw new Error(errorMessage);
-      }
-
-      // Handle SSE stream
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body');
-      }
-
-      const decoder = new TextDecoder();
-      let outputText = '';
-      let buffer = '';
-      let currentToolCall: { name: string; id: string; input: string } | null = null;
-
-      while (true) {
-        let readResult: ReadableStreamReadResult<Uint8Array>;
-        try {
-          readResult = await reader.read();
-        } catch (e) {
-          // Network interruption mid-stream
-          if (outputCell.isDisposed) break;
-          throw e;
-        }
-        const { done, value } = readResult;
-        if (done || outputCell.isDisposed) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process complete SSE events
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-        for (const rawLine of lines) {
-          // Trim CRLF for proxy compatibility
-          const line = rawLine.replace(/\r$/, '');
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            try {
-              const event = JSON.parse(data);
-              if (event.text) {
-                outputText += event.text;
-                outputCell.model.sharedModel.setSource(outputText);
-              } else if (event.error) {
-                outputText += `\n\n**Error:** ${event.error}\n`;
-                outputCell.model.sharedModel.setSource(outputText);
-              } else if (event.done) {
-                // Server-side tool loop handles execution
-                // If tools were requested but no kernel available, show error
-                if (currentToolCall && !kernelId) {
-                  outputText += '\n**Tool Error:** Tools require an active kernel.\n';
-                  outputCell.model.sharedModel.setSource(outputText);
-                }
-              } else if (event.tool_call) {
-                currentToolCall = {
-                  name: event.tool_call.name,
-                  id: event.tool_call.id,
-                  input: ''
-                };
-                outputText += `\n\n🔧 *Calling tool: \`${event.tool_call.name}\`...*\n`;
-                outputCell.model.sharedModel.setSource(outputText);
-              } else if (event.tool_input && currentToolCall) {
-                currentToolCall.input += event.tool_input;
-              } else if (event.tool_result) {
-                // Handle server-side tool execution result
-                const tr = event.tool_result;
-                const rendered = renderToolResult(tr.result);
-                outputText += rendered;
-                outputCell.model.sharedModel.setSource(outputText);
-                // Reset for potential next tool call
-                currentToolCall = null;
-              }
-            } catch {
-              // Ignore invalid JSON
-            }
-          }
-        }
-      }
 
       // Render markdown and add convert button
       if (!outputCell.isDisposed && outputCell instanceof MarkdownCell) {
         outputCell.rendered = true;
-        this._addConvertButton(panel, outputCell, outputText);
+        const showButton = this._settings?.showConvertButton ?? true;
+        if (showButton) {
+          this._addConvertButton(panel, outputCell, promptModel.output);
+        }
       }
     } catch (error: unknown) {
-      // Don't show error if request was aborted (cell/notebook closed)
       if (error instanceof Error && error.name === 'AbortError') {
         return;
       }
@@ -434,18 +475,23 @@ export class PromptCellManager {
         }
       }
     } finally {
+      promptModel.outputChanged.disconnect(onOutputChanged);
       outputCell.disposed.disconnect(abortOnDispose);
-      // Clear the active request flag
-      if (!outputCell.isDisposed) {
-        outputCell.model.deleteMetadata(ACTIVE_REQUEST_KEY);
-      }
+      (promptModel as PromptModel).dispose();
     }
+  }
+
+  /**
+   * Check if a cell is a prompt cell.
+   */
+  isPromptCell(cell: Cell): boolean {
+    return this._isPromptCellModel(cell.model);
   }
 
   /**
    * Check if a cell model is a prompt cell.
    */
-  private _isPromptCell(model: ICellModel): boolean {
+  private _isPromptCellModel(model: ICellModel): boolean {
     const metadata = model.getMetadata(PROMPT_METADATA_KEY) as PromptMetadata | undefined;
     return metadata?.isPromptCell === true;
   }

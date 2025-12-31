@@ -59,7 +59,9 @@
     "@jupyterlab/notebook": "^4.0.0",
     "@jupyterlab/rendermime": "^4.0.0",
     "@jupyterlab/services": "^7.0.0",
+    "@jupyterlab/settingregistry": "^4.0.0",
     "@jupyterlab/ui-components": "^4.0.0",
+    "@lumino/coreutils": "^2.0.0",
     "@lumino/messaging": "^2.0.0",
     "@lumino/signaling": "^2.0.0",
     "@lumino/widgets": "^2.0.0",
@@ -88,6 +90,7 @@
   "jupyterlab": {
     "extension": true,
     "outputDir": "ai_jup/labextension",
+    "schemaDir": "schema",
     "sharedPackages": {
       "@jupyterlab/application": {
         "bundled": false,
@@ -106,6 +109,10 @@
         "singleton": true
       },
       "@jupyterlab/services": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/settingregistry": {
         "bundled": false,
         "singleton": true
       }

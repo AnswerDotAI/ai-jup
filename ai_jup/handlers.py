@@ -35,11 +35,13 @@ class PromptHandler(APIHandler):
             variables = context.get("variables", {})
             functions = context.get("functions", {})
             preceding_code = context.get("preceding_code", "")
+            images = context.get("images", [])  # Multimodal image context
+            chart_specs = context.get("chartSpecs", [])  # Declarative viz specs
             model = data.get("model", "claude-sonnet-4-20250514")
             kernel_id = data.get("kernel_id")  # For server-side tool execution
             max_steps = int(data.get("max_steps", 1))  # Max tool loop iterations
 
-            system_prompt = self._build_system_prompt(preceding_code, variables, functions)
+            system_prompt = self._build_system_prompt(preceding_code, variables, functions, images, chart_specs)
             
             self.set_header("Content-Type", "text/event-stream")
             self.set_header("Cache-Control", "no-cache")
@@ -408,13 +410,23 @@ finally:
         except Exception as e:
             return {"error": str(e), "status": "error"}
 
-    def _build_system_prompt(self, preceding_code: str, variables: dict, functions: dict) -> list:
+    def _build_system_prompt(self, preceding_code: str, variables: dict, functions: dict, images: list = None, chart_specs: list = None) -> list:
         """Build the system prompt with context as content blocks for caching.
         
         Returns a list of content blocks suitable for Anthropic's system parameter.
         The base instructions are cached (stable across calls), while dynamic
         context (code, variables) is not cached.
+        
+        Args:
+            preceding_code: Code from preceding cells
+            variables: Variable info dict
+            functions: Function info dict
+            images: List of image context dicts with 'data', 'mimeType', 'source', 'cellIndex'
+            chart_specs: List of chart spec dicts with 'type', 'spec', 'cellIndex'
         """
+        images = images or []
+        chart_specs = chart_specs or []
+        
         # Base instructions - stable, cacheable (requires ~1024 tokens minimum)
         base_instructions = (
             "You are an AI assistant embedded in a Jupyter notebook. "
@@ -424,6 +436,21 @@ finally:
             "When you need to perform computations or get data, use the available tools. "
             "Tools return rich results including DataFrames as HTML tables and matplotlib figures as images."
         )
+        
+        # Add note about images if present
+        if images:
+            base_instructions += (
+                f" You can see {len(images)} image(s) from the notebook - these are outputs from "
+                "executed code cells or images attached to markdown cells. Refer to them in your response."
+            )
+        
+        # Add note about chart specs if present
+        if chart_specs:
+            base_instructions += (
+                f" You also have access to {len(chart_specs)} chart specification(s) from the notebook - "
+                "these are Vega-Lite (Altair) or Plotly JSON specs that describe visualizations. "
+                "Use these specs to understand what the charts show."
+            )
         
         blocks = [
             {
@@ -453,10 +480,49 @@ finally:
                 func_desc += f"- `{name}{sig}`: {doc}\n"
             dynamic_parts.append(func_desc)
         
+        # Add chart specs as text context (LLMs can understand JSON specs)
+        if chart_specs:
+            for i, spec in enumerate(chart_specs):
+                chart_type = spec.get("type", "unknown")
+                cell_idx = spec.get("cellIndex", "?")
+                spec_data = spec.get("spec", {})
+                
+                # Format the spec type nicely
+                type_label = "Vega-Lite (Altair)" if chart_type == "vega-lite" else "Plotly"
+                
+                # Truncate large specs to avoid token overflow
+                spec_json = json.dumps(spec_data, indent=2)
+                if len(spec_json) > 5000:
+                    spec_json = spec_json[:5000] + "\n... (truncated)"
+                
+                chart_desc = f"## Chart Specification {i+1} ({type_label} from cell {cell_idx})\n```json\n{spec_json}\n```"
+                dynamic_parts.append(chart_desc)
+        
         if dynamic_parts:
             blocks.append({
                 "type": "text", 
                 "text": "\n\n".join(dynamic_parts)
+            })
+        
+        # Add images to context (Anthropic format)
+        for i, img in enumerate(images):
+            source_desc = "cell output" if img.get("source") == "output" else "markdown attachment"
+            cell_idx = img.get("cellIndex", "?")
+            
+            # Add description before image
+            blocks.append({
+                "type": "text",
+                "text": f"## Image {i+1} (from {source_desc} in cell {cell_idx})"
+            })
+            
+            # Add the image
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("mimeType", "image/png"),
+                    "data": img.get("data", "")
+                }
             })
         
         return blocks
