@@ -1,6 +1,6 @@
 {
   "name": "ai-jup",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "JupyterLab extension for AI-powered prompt cells with variable and function references",
   "keywords": [
     "jupyter",
