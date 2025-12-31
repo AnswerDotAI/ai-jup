@@ -34,12 +34,6 @@
       "title": "Show Convert Button",
       "description": "Show the 'Convert to Cells' button on AI responses",
       "default": true
-    },
-    "streamingEnabled": {
-      "type": "boolean",
-      "title": "Enable Streaming",
-      "description": "Stream AI responses as they are generated (recommended)",
-      "default": true
     }
   },
   "additionalProperties": false
