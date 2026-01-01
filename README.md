@@ -5,7 +5,7 @@ A JupyterLab extension that adds AI-powered prompt cells with special syntax for
 [![CI](https://github.com/hamelsmu/ai-jup/actions/workflows/ci.yml/badge.svg)](https://github.com/hamelsmu/ai-jup/actions/workflows/ci.yml)
 ![JupyterLab 4.x](https://img.shields.io/badge/JupyterLab-4.x-blue)
 ![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green)
-![License MIT](https://img.shields.io/badge/License-MIT-yellow)
+![License MIT](https://img.shields.io/badge/License-GPL3-yellow)
 
 ## Features
 
